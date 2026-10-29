@@ -8,6 +8,8 @@ const HAS_CYR = new RegExp(CYR);
 
 // [regexp, замена] — для текстов, где важен порядок слов или подставляются значения
 const RULES = [
+  [/(\d+) сервисов(?![А-Яа-яЁё])/g, '$1 services'],
+  [/(\d+) работают/g, '$1 running'],
   [/Остановить (\d+) проброс\(ов\) и выйти\?/g, 'Stop $1 forward(s) and exit?'],
   [/Переключить на «([^»]*)»\? Будет остановлено пробросов: (\d+)/g, 'Switch to «$1»? Forwards to stop: $2'],
   [/порт (\d+) занят/g, 'port $1 is busy'],
@@ -34,6 +36,20 @@ const RULES = [
 
 // [фраза, перевод]. Слова на границах проверяются, чтобы не задеть куски других слов.
 const PHRASES = [
+  // версия 2.0: боковая панель, палитра команд, значки
+  ['все поды', 'all pods'], ['ЦЕЛЬ', 'TARGET'], ['авто', 'auto'], ['свой ', 'own '], ['общий ', 'shared '], ['Значки', 'Icons'],
+  ['СОЗДАН', 'CREATED'], ['запуск', 'starting'], ['Команды', 'Commands'], ['ШАБЛОНЫ', 'TEMPLATES'], ['включён', 'on'], ['выключен', 'off'],
+  [' → порт ', ' → port '], ['Как есть', 'As is'], ['ЛОКАЛЬНО', 'LOCAL'], ['Напрямую', 'Direct'], ['в работе', 'running'],
+  ['УЗЕЛ / IP', 'NODE / IP'], ['ИЗБРАННОЕ', 'FAVORITE'], ['АВТОЗАПУСК', 'AUTOSTART'], ['КОНТЕЙНЕРЫ', 'CONTAINERS'], ['ПЕРЕЗАПУСКИ', 'RESTARTS'],
+  ['Выберите под', 'Select a pod'], ['Выберите сервис', 'Select a service'], ['N — выбрать', 'N — choose'], ['все', 'all'],
+  ['Создать шаблон', 'Create template'], ['Удалить сервис', 'Delete service'], ['Удалить шаблон', 'Delete template'],
+  ['Добавить сервис', 'Add service'], ['Изменить сервис', 'Edit service'], ['Изменить шаблон', 'Edit template'],
+  ['kubeconfig не выбран', 'kubeconfig not selected'], ['Перейти на вкладку: ', 'Go to tab: '], ['Запустить все видимые', 'Start all visible'],
+  ['Остановить все видимые', 'Stop all visible'], ['Обновить список подов', 'Refresh pod list'], ['Перенести в избранное', 'Move to favorites'],
+  ['Проброс напрямую к поду', 'Forward directly to pod'], ['Запустить / остановить набор', 'Start / stop set'],
+  ['Проброс порта / стоп проброса', 'Forward port / stop forward'], ['Сохранить запущенные как шаблон', 'Save running as template'],
+  ['Старт / стоп выбранного сервиса', 'Start / stop selected service'], ['не удалось получить подробности', 'failed to load details'],
+  ['Значки: «авто» — Unicode на Windows, Nerd Font на Linux/macOS; без Nerd Font выберите Unicode', 'Icons: “auto” means Unicode on Windows and Nerd Font on Linux/macOS; pick Unicode if you have no Nerd Font'],
   // вкладки
   ['Избранное', 'Favorites'], ['Запущенные', 'Running'], ['Шаблоны', 'Templates'], ['Кластер', 'Cluster'],
   // колонки
@@ -204,7 +220,9 @@ KEYS (work on the Russian layout too; almost everything is clickable)
                  on its own port), directly to the pod (P), logs (L), to favorites (F),
                  namespace (N), refresh (R)
   K              choose a kubeconfig from the folder (F2 in the list — change the folder)
-  O              settings (kubeconfig folder, language, about)
+  O              settings (kubeconfig folder, language, icons, about)
+  Ctrl+P         command palette: search the actions of the tab (hotkeys stay the same)
+  Icons          auto / Unicode / Nerd Font / ASCII — in settings or BFTPORT_ICONS=unicode|nerd|ascii
   Q / Ctrl+C     exit (forwards are stopped)
 
 TEMPLATES

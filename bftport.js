@@ -179,7 +179,7 @@ async function launch(s) {
         r.want = false; r.status = 'error'; r.info = line.slice(0, 200);
         try { p.kill(); } catch (_) {}
       } else if (/Forwarding from/.test(line)) {
-        r.status = 'running'; r.retries = 0; r.info = `0.0.0.0:${s.localPort} → ${s.remotePort}`;
+        r.status = 'running'; r.since = Date.now(); r.retries = 0; r.info = `0.0.0.0:${s.localPort} → ${s.remotePort}`;
       } else if (/^error|unable to|an error occurred|lost connection/i.test(line)) {
         r.info = line.slice(0, 200);
       }
@@ -266,19 +266,43 @@ let W = 80, H = 24, hits = [];
 
 const LAT = { 'й': 'q', 'ф': 'a', 'у': 'e', 'в': 'd', 'ы': 's', 'ч': 'x', 'л': 'k', 'н': 'y', 'т': 'n', 'ш': 'i', 'п': 'g', 'д': 'l', 'щ': 'o', 'ц': 'w', 'к': 'r', 'с': 'c', 'з': 'p', 'а': 'f' };
 
-// стили
+// ───────────────────────── тема и иконки ─────────────────────────
 const RS = '\x1b[0m';
+const hx = h => [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16)).join(';');
+const fgc = h => `\x1b[38;2;${hx(h)}m`, bgc = h => `\x1b[48;2;${hx(h)}m`;
+const TH = { text: 'd5d9e4', dim: '98a1b6', gray: '7e879c', acc: '7aa2f7', ok: '8fd18f', warn: 'e5c07b', err: 'f27d84', fav: 'b69cf5',
+  ink: '14161c', sel: '232733', bar: '0e1014', panel: '171a21', chip: '2a2f3d', line: '2e3340', field: '232733', fieldF: '34406a', danger: 'b4424a' };
 const C = {
-  title: '\x1b[1;97;48;5;25m', head: '\x1b[1;38;5;245;48;5;236m', sel: '\x1b[48;5;238m',
-  dim: '\x1b[38;5;245m', key: '\x1b[1;30;48;5;179m', btn: '\x1b[97;48;5;237m',
-  green: '\x1b[1;38;5;78m', red: '\x1b[1;38;5;203m', yellow: '\x1b[1;38;5;221m', gray: '\x1b[38;5;243m',
-  input: '\x1b[97;48;5;236m', inputF: '\x1b[1;97;48;5;24m', bold: '\x1b[1m', sys: '\x1b[38;5;110m',
-  danger: '\x1b[1;97;48;5;124m',
+  title: '\x1b[1m' + fgc(TH.ink) + bgc(TH.acc), head: fgc(TH.dim) + bgc(TH.bar), sel: bgc(TH.sel),
+  dim: fgc(TH.dim), key: '\x1b[1m' + fgc(TH.text) + bgc(TH.chip), btn: fgc(TH.dim) + bgc(TH.bar),
+  green: fgc(TH.ok), red: fgc(TH.err), yellow: fgc(TH.warn), gray: fgc(TH.gray),
+  input: fgc(TH.text) + bgc(TH.field), inputF: '\x1b[1m' + fgc(TH.text) + bgc(TH.fieldF), bold: '\x1b[1m', sys: fgc(TH.acc),
+  danger: '\x1b[1m' + fgc('ffffff') + bgc(TH.danger), acc: fgc(TH.acc), fav: fgc(TH.fav), panel: bgc(TH.panel), chip: fgc(TH.text) + bgc(TH.chip),
+  bar: fgc(TH.text) + bgc(TH.bar), line: fgc(TH.line), accBg: fgc(TH.ink) + bgc(TH.acc),
 };
+// Наборы значков. unicode — работает в любом терминале (Windows Terminal, conhost); nerd — для шрифтов Nerd Font (Linux/macOS);
+// ascii — запасной вариант. Выбирается в настройках (по умолчанию «авто»: Windows — unicode, Linux/macOS — nerd).
+const ICON_SETS = {
+  unicode: { running: '●', starting: '◐', restarting: '↻', error: '✖', stopped: '○', fav: '★', brand: '⎈', search: '⌕', view: '◉', sep: '', pod: '⎈', fold: '▾' },
+  nerd: { running: '\uf058', starting: '\uf110', restarting: '\uf021', error: '\uf057', stopped: '\uf10c', fav: '\uf005', brand: '⎈', search: '\uf002', view: '\uf06e', sep: '\ue0b0', pod: '\uf1b2', fold: '\uf078' },
+  ascii: { running: '*', starting: '~', restarting: '@', error: 'x', stopped: 'o', fav: '*', brand: '#', search: '/', view: 'o', sep: '', pod: '#', fold: 'v' },
+};
+const ICON_MODES = ['auto', 'unicode', 'nerd', 'ascii'];
+const iconMode = () => {
+  const m = String(process.env.BFTPORT_ICONS || db.icons || 'auto').toLowerCase();
+  const v = ICON_MODES.includes(m) ? m : 'auto';
+  return v === 'auto' ? (process.platform === 'win32' ? 'unicode' : 'nerd') : v;
+};
+let IC = ICON_SETS.unicode;
 const STATUS = {
   running: ['●', C.green, 'работает'], starting: ['◐', C.yellow, 'запуск…'], restarting: ['↻', C.yellow, 'рестарт'],
   error: ['✖', C.red, 'ошибка'], stopped: ['○', C.gray, 'стоп'],
 };
+function applyIcons() {
+  IC = ICON_SETS[iconMode()];
+  for (const k of Object.keys(STATUS)) STATUS[k][0] = IC[k];
+}
+applyIcons();
 
 // ───────────────────────── ввод текста: курсор и вставка ─────────────────────────
 const isSep = ch => /[\s\\\/.:_-]/.test(ch);
@@ -344,14 +368,15 @@ class Row {
     text = String(text);
     if (!raw && UILANG === 'en' && (i18n.HAS_CYR.test(text) || text.includes('\u2060'))) text = trKeep(text);
     else text = i18n.strip(text);
-    if (this.x >= W) return this;
-    if (this.x + text.length > W) text = text.slice(0, W - this.x);
+    const max = this.lim === undefined ? W : this.lim; // lim — правая граница, пока строка делится на список и боковую панель
+    if (this.x >= max) return this;
+    if (this.x + text.length > max) text = text.slice(0, max - this.x);
     if (fn) hits.push({ y: this.y, x1: this.x, x2: this.x + text.length - 1, fn });
     this.out += style + text + RS;
     this.x += text.length;
     return this;
   }
-  fill(style = '') { if (this.x < W) this.add(' '.repeat(W - this.x), style); return this; }
+  fill(style = '') { const max = this.lim === undefined ? W : this.lim; if (this.x < max) this.add(' '.repeat(max - this.x), style); return this; }
 }
 const trunc = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, Math.max(0, n - 1)) + '…' : s.padEnd(n); };
 
@@ -369,22 +394,52 @@ function render() {
   else if (ui.mode === 'picker') rows = renderPicker();
   else if (ui.mode === 'logs') rows = renderLogs();
   else rows = renderList();
+  if (ui.mode === 'list' || ui.mode === 'confirm') rows[H - 1] = statusRow(H - 1);
   if (ui.mode === 'confirm') rows = confirmOverlay(rows); // диалог подтверждения поверх любой вкладки
   let out = '\x1b[?25l';
   for (let i = 0; i < H; i++) out += `\x1b[${i + 1};1H` + (rows[i] ? rows[i].out : ' '.repeat(W));
   process.stdout.write(out);
 }
 
-function buttonRows(y, buttons) {
-  // раскладывает кнопки по строкам; возвращает массив Row
-  const rows = [new Row(y)];
+function buttonRows(y, buttons, hint) {
+  // раскладывает подсказки клавиш по строкам нижней полосы; hint — правая подсказка на последней строке
+  const rows = [new Row(y).add(' ', C.btn)];
   for (const b of buttons) {
     let r = rows[rows.length - 1];
-    const w = b.key.length + tr(b.label).length + 4;
-    if (r.x + w > W && r.x > 0) { r = new Row(y + rows.length); rows.push(r); }
-    r.add(' ' + b.key + ' ', C.key, b.fn).add(' ' + tr(b.label) + ' ', C.btn, b.fn).add(' ');
+    const w = b.key.length + tr(b.label).length + 5;
+    if (r.x + w > W && r.x > 1) { r.fill(C.btn); r = new Row(y + rows.length).add(' ', C.btn); rows.push(r); }
+    r.add(' ' + b.key + ' ', C.key, b.fn).add(' ' + tr(b.label) + '  ', C.btn, b.fn);
   }
+  const last = rows[rows.length - 1];
+  if (hint) {
+    const need = hint.key.length + tr(hint.label).length + 5;
+    if (W - last.x >= need + 2) last.add(' '.repeat(W - last.x - need - 1), C.btn).add(' ' + hint.key + ' ', C.key, hint.fn).add(' ' + tr(hint.label) + ' ', C.btn, hint.fn);
+  }
+  rows.forEach(r => r.fill(C.btn));
   return rows;
+}
+const btnCount = (btns, hint) => { const n = hits.length, c = buttonRows(0, btns, hint).length; hits.length = n; return c; };
+const PALETTE_HINT = { key: 'Ctrl+P', label: 'Команды', fn: () => openPalette() };
+
+// Строка состояния внизу экрана вкладок: kubeconfig · счётчики · сообщение
+function statusRow(y) {
+  const r = new Row(y);
+  const kc = db.kubeconfig ? path.basename(db.kubeconfig) : 'kubeconfig не выбран';
+  const running = allSvcs().filter(s => rt(s).status === 'running').length;
+  const kcFn = () => switchKubeconfig();
+  if (IC.sep) {
+    r.add(` ${IC.brand} `, C.accBg + C.bold, kcFn).add(kc + ' ', C.accBg + C.bold, kcFn, !!db.kubeconfig).add(IC.sep, fgc(TH.acc) + bgc(TH.chip))
+      .add(` ${db.services.length} сервисов `, C.chip).add(IC.sep, fgc(TH.chip) + bgc(TH.bar)).add(` ${running} работают`, C.btn);
+  } else {
+    r.add(' ' + (db.kubeconfig ? '' : ''), C.btn).add(kc, C.btn, kcFn, !!db.kubeconfig).add(`  │  ${db.services.length} сервисов  │  ${running} работают`, C.btn);
+  }
+  if (ui.tab === 'cluster' && ui.pods.summary) r.add('  │  ' + ui.pods.summary, C.btn);
+  if (Date.now() < ui.flashUntil) {
+    const m = '⚠ ' + ui.flash + ' ';
+    const w = Math.min(m.length, Math.max(0, W - r.x - 2));
+    if (w > 4) r.add(' '.repeat(W - r.x - w), C.btn).add(m.slice(0, w), fgc(TH.warn) + bgc(TH.bar));
+  }
+  return r.fill(C.btn);
 }
 
 // Поиск у каждой вкладки свой. ui.query / qpos / qoff / searching всегда принадлежат активной вкладке; при уходе с неё
@@ -411,10 +466,14 @@ function matchKind(s) {
   const meta = [s.name, s.namespace, s.service, s.localPort, s.remotePort, s.kubeconfig, STATUS[r.status][2], i18n.translate(STATUS[r.status][2]), r.info].join(' ').toLowerCase();
   return terms.every(t => meta.includes(t)) ? 'meta' : null;
 }
+const nsKey = s => String(s.namespace || '').toLowerCase();
 function visible() {
-  // «Избранное» — только сохранённые сервисы; остальные вкладки показывают всё запущенное, включая пробросы к подам
-  return (ui.tab === 'all' ? db.services : allSvcs().filter(isActive)).filter(matchKind);
+  // «Избранное» — только сохранённые сервисы; остальные вкладки показывают всё запущенное, включая пробросы к подам.
+  // Список сгруппирован по namespace (порядок внутри группы — как в базе).
+  const list = (ui.tab === 'all' ? db.services : allSvcs().filter(isActive)).filter(matchKind);
+  return list.map((x, i) => [x, i]).sort((a, b) => nsKey(a[0]) < nsKey(b[0]) ? -1 : nsKey(a[0]) > nsKey(b[0]) ? 1 : a[1] - b[1]).map(x => x[0]);
 }
+function selectSvc(x) { ui.sel = Math.max(0, visible().indexOf(x)); }
 const curSvc = () => visible()[ui.sel];
 
 // шаблоны: набор сервисов, запускаемый одним нажатием
@@ -456,9 +515,22 @@ function renderGroups(rows) {
   const h = new Row(2);
   h.add(' ', C.head).add('  ' + trunc(tr('ШАБЛОН'), nameW) + ' ', C.head).add(trunc(tr('СТАТУС'), 16) + ' ', C.head).add(tr('СОСТАВ'), C.head).fill(C.head);
   rows.push(h);
-  const logH = Math.max(3, Math.min(10, Math.floor(H * 0.3)));
-  const listH = Math.max(3, H - 6 - logH);
   if (ui.gsel >= gs.length) ui.gsel = Math.max(0, gs.length - 1);
+  const cur0 = gs[ui.gsel], st0 = cur0 ? groupStat(cur0) : null;
+  const allOn = st0 && st0.m.length && st0.act === st0.m.length;
+  const btns = [
+    { key: 'Enter', label: allOn ? 'Остановить набор' : 'Запустить набор', fn: () => toggleGroup(curGroup()) },
+    { key: 'A', label: 'Создать', fn: () => openGroupForm() },
+    { key: 'E', label: 'Изменить', fn: () => cur0 && openGroupForm(cur0) },
+    { key: 'D', label: 'Удалить', fn: () => askDeleteGroup() },
+    { key: '/', label: 'Поиск', fn: () => { ui.searching = true; draw(); } },
+    { key: 'O', label: 'Настройки', fn: () => openSettings() },
+    { key: 'K', label: 'Конфиг', fn: () => switchKubeconfig() },
+    { key: 'Q', label: 'Выход', fn: () => quit() },
+  ];
+  const nb = btnCount(btns, PALETTE_HINT);
+  const logH = Math.max(3, Math.min(8, Math.floor(H * 0.25)));
+  const listH = Math.max(3, H - 5 - logH - nb);
   if (ui.gsel < ui.goff) ui.goff = ui.gsel;
   if (ui.gsel >= ui.goff + listH) ui.goff = ui.gsel - listH + 1;
   for (let i = 0; i < listH; i++) {
@@ -472,8 +544,8 @@ function renderGroups(rows) {
     }
     const idx = ui.goff + i, bg = idx === ui.gsel ? C.sel : '', click = () => onGroupClick(idx);
     const st = groupStat(g);
-    const [icon, col] = !st.m.length ? ['○', C.gray] : st.err ? ['✖', C.red] : st.run === st.m.length ? ['●', C.green] : st.act ? ['◐', C.yellow] : ['○', C.gray];
-    row.add(idx === ui.gsel ? '▌' : ' ', C.yellow + bg, click).add(' ' + icon + ' ', col + bg, click)
+    const [icon, col] = !st.m.length ? [IC.stopped, C.gray] : st.err ? [IC.error, C.red] : st.run === st.m.length ? [IC.running, C.green] : st.act ? [IC.starting, C.yellow] : [IC.stopped, C.gray];
+    row.add(idx === ui.gsel ? '▌' : ' ', C.acc + bg, click).add(' ' + icon + ' ', col + bg, click)
       .add(trunc(g.name, nameW) + ' ', C.bold + bg, click, true)
       .add(trunc(`${st.run}/${st.m.length} работает`, 16) + ' ', col + bg, click)
       .add(trunc(st.m.map(s => s.name).join(', '), W - row.x), C.dim + bg, click, true);
@@ -487,19 +559,7 @@ function renderGroups(rows) {
     if (s) { const st = STATUS[rt(s).status]; row.add(' ' + st[0] + ' ', st[1]).add(trunc(s.name, 28) + ' ', '', undefined, true).add(trunc(`${s.namespace}/${s.service}`, 38) + ' ', C.dim, undefined, true).add(`:${s.localPort}  ${st[2]}`, C.gray); }
     row.fill(); rows.push(row);
   }
-  const st = cur ? groupStat(cur) : null;
-  const allOn = st && st.m.length && st.act === st.m.length;
-  const btns = [
-    { key: 'Enter', label: allOn ? 'Остановить набор' : 'Запустить набор', fn: () => toggleGroup(curGroup()) },
-    { key: 'A', label: 'Создать', fn: () => openGroupForm() },
-    { key: 'E', label: 'Изменить', fn: () => cur && openGroupForm(cur) },
-    { key: 'D', label: 'Удалить', fn: () => askDeleteGroup() },
-    { key: '/', label: 'Поиск', fn: () => { ui.searching = true; draw(); } },
-    { key: 'O', label: 'Настройки', fn: () => openSettings() },
-    { key: 'K', label: 'Конфиг', fn: () => switchKubeconfig() },
-    { key: 'Q', label: 'Выход', fn: () => quit() },
-  ];
-  for (const r of buttonRows(4 + listH + logH, btns)) { r.fill(); rows.push(r); }
+  for (const r of buttonRows(4 + listH + logH, btns, PALETTE_HINT)) rows.push(r);
   return rows;
 }
 
@@ -539,86 +599,101 @@ function submitGroup(f, g) {
   saveDb(); closeForm();
 }
 
-function renderList() {
-  const rows = [];
-  const isG = ui.tab === 'groups';
-  const svcs = isG ? [] : visible();
-  const running = allSvcs().filter(s => rt(s).status === 'running').length;
-  const activeN = allSvcs().filter(isActive).length;
-  const t = new Row(0);
-  t.add(` ⇄ BFTPort v${VERSION} `, C.title).add(` ${db.services.length} сервисов · ${running} работает `, C.title);
-  const kc = db.kubeconfig ? '⎈ ' + path.basename(db.kubeconfig) + ' ▾' : 'kubeconfig не выбран (K)';
-  const right = ` ${kc} `;
-  const fl_ = Date.now() < ui.flashUntil ? tr(' ⚠ ' + ui.flash + ' ') : '';
-  if (fl_ && W - t.x > right.length + 4) t.add(fl_.slice(0, W - t.x - right.length - 1), '\x1b[1;93;48;5;25m');
-  if (W - t.x > right.length) t.add(' '.repeat(W - t.x - right.length), C.title).add(right, C.title, () => switchKubeconfig());
-  t.fill(C.title); rows.push(t);
+// ───────────────────────── шапка, вкладки, боковая панель ─────────────────────────
+function topRows(found) {
+  const all = allSvcs(), cn = k => all.filter(x => rt(x).status === k).length;
+  const cnt = { run: cn('running'), start: cn('starting') + cn('restarting'), err: cn('error') };
+  cnt.stop = all.length - cnt.run - cnt.start - cnt.err;
+  const t = new Row(0), kcFn = () => switchKubeconfig();
+  t.add(` ${IC.brand} BFTPort `, C.title);
+  if (IC.sep) t.add(IC.sep, fgc(TH.acc) + bgc(TH.chip)); else t.add(' ');
+  t.add(' ', C.chip, kcFn);
+  if (db.kubeconfig) t.add(IC.brand + ' ' + path.basename(db.kubeconfig) + ' ▾', C.chip, kcFn, true); else t.add('kubeconfig не выбран (K)', C.chip, kcFn);
+  t.add(' ', C.chip, kcFn);
+  if (IC.sep) t.add(IC.sep, fgc(TH.chip));
+  t.add(` K  v${VERSION}`, C.dim);
+  const wide = W >= 100;
+  const parts = [[IC.running, C.green, cnt.run, 'в работе'], [IC.starting, C.yellow, cnt.start, 'запуск'], [IC.error, C.red, cnt.err, 'ошибка'], [IC.stopped, C.gray, cnt.stop, 'стоп']]
+    .map(p => ({ st: p[2] ? p[1] : C.gray, txt: ` ${p[0]} ${p[2]}${wide ? ' ' + tr(p[3]) : ''} ` }));
+  const total = parts.reduce((n, p) => n + p.txt.length, 0);
+  if (W - t.x > total + 1) { t.add(' '.repeat(W - t.x - total), ''); for (const p of parts) t.add(p.txt, p.st, undefined, true); }
+  t.fill();
 
   const tb = new Row(1);
-  const tab = (id, label) => tb.add(` ${tr(label)} `, ui.tab === id ? C.key : C.btn, () => { enterTab(id); ui.sel = 0; ui.off = 0; ui.gsel = 0; ui.goff = 0; ui.psel = 0; ui.poff = 0; ui.pkey = ''; if (id === 'cluster') refreshPods(); draw(); }).add(' ');
+  const tab = (id, label) => tb.add(` ${tr(label)} `, ui.tab === id ? C.key : C.dim, () => { enterTab(id); ui.sel = 0; ui.off = 0; ui.gsel = 0; ui.goff = 0; ui.psel = 0; ui.poff = 0; ui.pkey = ''; if (id === 'cluster') refreshPods(); draw(); }).add(' ');
   tb.add(' ');
-  tab('all', `1 Избранное (${db.services.length})`); tab('running', `2 Запущенные (${activeN})`); tab('groups', `3 Шаблоны (${db.groups.length})`); tab('cluster', `4 Кластер (${ui.pods.at ? ui.pods.list.length : '…'})`);
+  tab('all', `1 Избранное (${db.services.length})`); tab('running', `2 Запущенные (${all.filter(isActive).length})`); tab('groups', `3 Шаблоны (${db.groups.length})`); tab('cluster', `4 Кластер (${ui.pods.at ? ui.pods.list.length : '…'})`);
   tb.add('  ');
   const goSearch = () => { ui.searching = true; draw(); };
-  tb.add(' ⌕ ', ui.searching ? C.inputF : C.input, goSearch);
+  tb.add(` ${IC.search} `, ui.searching ? C.inputF : C.input, goSearch);
   const boxW = Math.max(10, Math.min(40, W - tb.x - 12));
   const qs = ui.searching ? C.inputF : (ui.query ? C.input : C.input + C.gray);
   if (ui.query || ui.searching) { tb.add(' ', qs, goSearch); addInput(tb, ui, 'query', 'qpos', 'qoff', boxW - 1, qs, ui.searching, goSearch); tb.add(' ', qs, goSearch); }
   else tb.add(trunc('поиск: / или Ctrl+F', boxW) + ' ', qs, goSearch);
   if (ui.query) tb.add(' ✕ ', C.btn, () => { ui.query = ''; ui.qpos = 0; ui.searching = false; ui.sel = 0; ui.gsel = 0; draw(); });
-  if (ui.query) tb.add(` найдено: ${isG ? groupsVisible().length : ui.tab === 'cluster' ? podsVisible().length : svcs.length}`, C.dim);
-  tb.fill(); rows.push(tb);
+  if (ui.query) tb.add(` найдено: ${found}`, C.dim);
+  tb.fill();
+  return [t, tb];
+}
+const panelW = () => W >= 108 ? Math.min(40, Math.floor(W * 0.3)) : 0;
+// достраивает строку боковой панелью: список слева (до row.lim), справа — строки spec (массив [текст, стиль, клик, raw])
+function addPanel(row, spec) {
+  row.lim = undefined;
+  row.add('│', C.line);
+  row.add(' ', C.panel);
+  for (const [t, st, fn, raw] of spec || []) row.add(t, C.panel + (st || ''), fn, raw);
+  row.add(' '.repeat(Math.max(0, W - row.x)), C.panel);
+}
+const pLabel = t => [[t, C.dim]];
+const pChips = list => list.flatMap(([k, label, fn, primary], i) => [[' ' + k + ' ', primary ? C.accBg + C.bold : C.key, fn], [' ' + label + ' ', C.dim, fn], [i < list.length - 1 ? ' ' : '', '']]);
+function fmtUp(ms) {
+  const m = Math.floor(ms / 60000), h = Math.floor(m / 60), en = UILANG === 'en';
+  if (h >= 24) return `${Math.floor(h / 24)}${en ? 'd' : 'д'} ${h % 24}${en ? 'h' : 'ч'}`;
+  if (h) return `${h}${en ? 'h' : 'ч'} ${m % 60}${en ? 'm' : 'м'}`;
+  if (m) return `${m}${en ? 'm' : 'м'}`;
+  return `${Math.floor(ms / 1000)}${en ? 's' : 'с'}`;
+}
+const baseOf = f => path.basename(String(f));
+
+function favPanel(cur, btns) {
+  const L = [];
+  if (!cur) return [pLabel('Выберите сервис')];
+  const r = rt(cur), st = STATUS[r.status];
+  L.push([[(cur.kind === 'pod' ? IC.pod + ' ' : '') + cur.name, C.bold, undefined, true]]);
+  L.push([[st[0] + ' ' + st[2], st[1]], ...(r.status === 'running' && r.since ? [[' · ' + fmtUp(Date.now() - r.since), st[1], undefined, true]] : [])]);
+  L.push([]);
+  L.push(pLabel('ЛОКАЛЬНО'));
+  L.push([[`0.0.0.0:${cur.localPort}`, C.acc, undefined, true]]);
+  L.push([]);
+  L.push(pLabel('ЦЕЛЬ'));
+  L.push([[`${cur.kind === 'pod' ? 'pod' : 'service'}/${cur.service}`, '', undefined, true]]);
+  L.push([['ns ', C.dim], [cur.namespace, C.dim, undefined, true], [' → порт ', C.dim], [String(cur.remotePort), C.dim, undefined, true]]);
+  L.push([]);
+  L.push(pLabel('KUBECONFIG'));
+  const kc = kubeconfigOf(cur);
+  L.push([[cur.kubeconfig ? 'свой ' : 'общий ', ''], [kc ? baseOf(kc) : '—', C.dim, undefined, true]]);
+  L.push([]);
+  L.push(pLabel('АВТОЗАПУСК'));
+  L.push([[cur.autostart ? 'включён' : 'выключен', cur.autostart ? C.green : C.dim]]);
+  const gs = db.groups.filter(g => g.services.includes(cur.id));
+  if (gs.length) { L.push([]); L.push(pLabel('ШАБЛОНЫ')); L.push([[gs.map(g => g.name).join(', '), '', undefined, true]]); }
+  L.push([]);
+  L.push(pChips([['Enter', isActive(cur) ? 'Стоп' : 'Старт', btns[0].fn, true], ['L', 'Логи', btns.find(b => b.key === 'L').fn]]));
+  L.push(pChips([['E', 'Изменить', btns.find(b => b.key === 'E').fn], ['G', 'В шаблон', btns.find(b => b.key === 'G').fn]]));
+  return L;
+}
+
+function renderList() {
+  const rows = [];
+  const isG = ui.tab === 'groups';
+  const svcs = isG ? [] : visible();
+  rows.push(...topRows(isG ? groupsVisible().length : ui.tab === 'cluster' ? podsVisible().length : svcs.length));
   if (isG) return renderGroups(rows);
   if (ui.tab === 'cluster') return renderCluster(rows);
 
-  const nameW = Math.max(12, Math.min(26, Math.floor(W * 0.22)));
-  const targetW = Math.max(16, Math.min(40, Math.floor(W * 0.33)));
-  const h = new Row(2);
-  h.add(' ', C.head).add('  ' + trunc(tr('СЕРВИС'), nameW) + ' ', C.head).add(trunc('NS / SERVICE', targetW) + ' ', C.head)
-    .add(trunc(tr('ПОРТ'), 14) + ' ', C.head).add(tr('СТАТУС'), C.head).fill(C.head);
-  rows.push(h);
-
-  const logH = Math.max(3, Math.min(10, Math.floor(H * 0.3)));
-  const listH = Math.max(3, H - 6 - logH);
+  const PW = panelW(), LW = PW ? W - PW - 1 : W;
   if (ui.sel >= svcs.length) ui.sel = Math.max(0, svcs.length - 1);
-  if (ui.sel < ui.off) ui.off = ui.sel;
-  if (ui.sel >= ui.off + listH) ui.off = ui.sel - listH + 1;
-
-  for (let i = 0; i < listH; i++) {
-    const y = 3 + i, row = new Row(y), s = svcs[ui.off + i];
-    if (!s) {
-      if (!svcs.length && i === 1) {
-        if (!db.services.length) row.add('  Пока пусто. Нажмите ', C.dim).add(' A ', C.key, () => openServiceForm()).add(' чтобы добавить сервис', C.dim);
-        else row.add(ui.query ? '  Ничего не найдено по запросу' : '  Нет запущенных сервисов — выберите вкладку «Избранное» и нажмите Enter', C.dim);
-      }
-      row.fill(); rows.push(row); continue;
-    }
-    const idx = ui.off + i, r = rt(s), st = STATUS[r.status];
-    const bg = idx === ui.sel ? C.sel : '';
-    const click = () => onRowClick(idx);
-    row.add(idx === ui.sel ? '▌' : ' ', C.yellow + bg, click)
-      .add(' ' + st[0] + ' ', st[1] + bg, click)
-      .add(trunc((s.kind === 'pod' ? '⎈ ' : '') + s.name, nameW) + ' ', C.bold + bg, click, true)
-      .add(trunc(`${s.namespace}/${s.kind === 'pod' ? 'pod/' : ''}${s.service}`, targetW) + ' ', C.dim + bg, click, true)
-      .add(trunc(`${s.localPort}:${s.remotePort}`, 14) + ' ', bg, click);
-    const left = W - row.x;
-    const detail = r.status === 'running' || r.status === 'stopped' && !r.info ? st[2] + (s.autostart ? ' · авто' : '') : `${st[2]} · ${r.info}`;
-    row.add(trunc(detail, left), (r.status === 'stopped' ? C.gray : st[1]) + bg, click);
-    row.fill(bg); rows.push(row);
-  }
-
   const cur = svcs[ui.sel];
-  const sep = new Row(3 + listH);
-  sep.add(' Логи' + (cur ? ': ' + D(cur.name) : '') + ' ', C.head, () => openLogs()).add(cur ? ' L — открыть на весь экран (логи пода) ' : '', C.head, () => openLogs()).fill(C.head); rows.push(sep);
-  const log = cur ? rt(cur).log : [];
-  const shown = log.slice(-logH);
-  for (let i = 0; i < logH; i++) {
-    const row = new Row(4 + listH + i), l = shown[i];
-    if (l) row.add(' ' + l.t + ' ', C.gray).add(l.text, l.sys ? C.sys : '', undefined, !l.sys);
-    row.fill(); rows.push(row);
-  }
-
-  const fy = 4 + listH + logH;
   const btns = [
     { key: 'Enter', label: cur && isActive(cur) ? 'Стоп' : 'Старт', fn: () => toggle() },
     { key: 'A', label: 'Добавить', fn: () => openServiceForm() },
@@ -633,8 +708,82 @@ function renderList() {
     { key: 'K', label: 'Конфиг', fn: () => switchKubeconfig() },
     { key: 'Q', label: 'Выход', fn: () => quit() },
   ];
-  const br = buttonRows(fy, btns);
-  for (const r of br) { r.fill(); rows.push(r); }
+  const nb = btnCount(btns, PALETTE_HINT);
+  const logH = Math.max(3, Math.min(8, Math.floor(H * 0.25)));
+  const listH = Math.max(3, H - 6 - logH - nb);
+  const pl = PW ? favPanel(cur, btns) : null;
+  const mk = y => { const r = new Row(y); if (PW) r.lim = LW; return r; };
+  const done = (r, bg) => { r.fill(bg); if (PW) addPanel(r, pl[r.y - 2]); rows.push(r); };
+
+  const nameW = Math.max(12, Math.min(26, Math.floor(LW * 0.22)));
+  const portW = 7;
+  const targetW = Math.max(16, Math.min(38, Math.floor(LW * 0.33)));
+  const h = mk(2);
+  h.add('    ', C.head).add(trunc(tr('СЕРВИС'), nameW) + ' ', C.head).add(trunc(tr('ПОРТ'), portW) + ' ', C.head)
+    .add(trunc('NS / SERVICE', targetW) + ' ', C.head).add(tr('СТАТУС'), C.head);
+  done(h, C.head);
+
+  // экранные строки: заголовки namespace и сервисы
+  const lines = [];
+  let prev = null;
+  svcs.forEach((x, i) => {
+    if (x.namespace !== prev) { lines.push({ hdr: x.namespace, n: svcs.filter(y => y.namespace === x.namespace).length }); prev = x.namespace; }
+    lines.push({ idx: i });
+  });
+  const selLine = lines.findIndex(l => l.idx === ui.sel);
+  let want = selLine; if (want > 0 && lines[want - 1].hdr !== undefined) want--;
+  if (selLine >= 0) { if (want < ui.off) ui.off = want; if (selLine >= ui.off + listH) ui.off = selLine - listH + 1; }
+  ui.off = Math.max(0, Math.min(ui.off, Math.max(0, lines.length - listH)));
+
+  for (let i = 0; i < listH; i++) {
+    const y = 3 + i, row = mk(y), ln = lines[ui.off + i];
+    if (!ln) {
+      if (!svcs.length && i === 1) {
+        if (!db.services.length) row.add('  Пока пусто. Нажмите ', C.dim).add(' A ', C.key, () => openServiceForm()).add(' чтобы добавить сервис', C.dim);
+        else row.add(ui.query ? '  Ничего не найдено по запросу' : '  Нет запущенных сервисов — выберите вкладку «Избранное» и нажмите Enter', C.dim);
+      }
+      done(row); continue;
+    }
+    if (ln.hdr !== undefined) {
+      row.add(` ${IC.fold} `, C.dim).add(ln.hdr, C.bold, undefined, true).add(` ${ln.n} `, C.dim);
+      row.add('─'.repeat(Math.max(0, (row.lim === undefined ? W : row.lim) - row.x)), C.line);
+      done(row); continue;
+    }
+    const idx = ln.idx, x = svcs[idx], r = rt(x), st = STATUS[r.status];
+    const bg = idx === ui.sel ? C.sel : '';
+    const click = () => onRowClick(idx);
+    row.add(idx === ui.sel ? '▌' : ' ', C.acc + bg, click)
+      .add(' ' + st[0] + ' ', st[1] + bg, click)
+      .add(trunc((x.kind === 'pod' ? IC.pod + ' ' : '') + x.name, nameW) + ' ', (r.status === 'stopped' ? C.dim : C.bold) + bg, click, true)
+      .add(trunc(':' + x.localPort, portW) + ' ', (r.status === 'stopped' ? C.dim : C.acc) + bg, click, true)
+      .add(trunc(`${x.remotePort} · ${x.namespace}/${x.kind === 'pod' ? 'pod/' : ''}${x.service}`, targetW) + ' ', C.dim + bg, click, true);
+    const stCol = (r.status === 'stopped' ? C.gray : st[1]) + bg;
+    row.add(st[2], stCol, click);
+    if (r.status === 'running' && r.since) row.add(' ' + fmtUp(Date.now() - r.since), stCol, click, true);
+    if (r.status === 'running' && x.autostart) row.add(' · авто', stCol, click);
+    if ((r.status === 'error' || r.status === 'restarting' || r.status === 'starting') && r.info) row.add(' · ' + r.info, stCol, click, true);
+    done(row, bg);
+  }
+
+  // линия над заголовком блока, чтобы журнал не «висел в воздухе»
+  const rule = mk(3 + listH);
+  rule.add('─'.repeat(rule.lim === undefined ? W : rule.lim), C.line);
+  done(rule);
+  const sep = mk(4 + listH);
+  const hint = cur ? 'L — открыть на весь экран (логи пода) ' : '';
+  sep.add(' Логи' + (cur ? ': ' : ''), C.dim + C.bold, () => openLogs());
+  if (cur) sep.add(cur.name, C.bold, () => openLogs(), true);
+  sep.add(' '.repeat(Math.max(1, (sep.lim === undefined ? W : sep.lim) - sep.x - tr(hint).length)), '');
+  if (hint) sep.add(hint, C.dim, () => openLogs());
+  done(sep);
+  const log = cur ? rt(cur).log : [];
+  const shown = log.slice(-logH);
+  for (let i = 0; i < logH; i++) {
+    const row = mk(5 + listH + i), l = shown[i];
+    if (l) row.add(' ' + l.t + ' ', C.gray).add(l.text, l.sys ? C.sys : '', undefined, !l.sys);
+    done(row);
+  }
+  for (const r of buttonRows(5 + listH + logH, btns, PALETTE_HINT)) rows.push(r);
   return rows;
 }
 
@@ -741,7 +890,7 @@ function submitService(f, s) {
   if (s) {
     Object.assign(s, data); restartNow(s);
   } else {
-    const ns = { id: uid(), ...data }; db.services.push(ns); gotoTab('all'); ui.sel = db.services.length - 1;
+    const ns = { id: uid(), ...data }; db.services.push(ns); gotoTab('all'); selectSvc(ns);
   }
   saveDb(); closeForm();
 }
@@ -785,6 +934,7 @@ function openSettings() {
     fields: [
       { key: 'dir', label: 'Папка с kubeconfig', value: db.kubeconfigDir || '', hint: 'например C:\\Users\\me\\kube' },
       { key: 'lang', label: 'Язык / Language', value: UILANG, choice: [{ v: 'ru', label: 'Русский' }, { v: 'en', label: 'English' }] },
+      { key: 'icons', label: 'Значки', value: ICON_MODES.includes(db.icons) ? db.icons : 'auto', choice: [{ v: 'auto', label: 'авто' }, { v: 'unicode', label: 'Unicode' }, { v: 'nerd', label: 'Nerd Font' }, { v: 'ascii', label: 'ASCII' }] },
     ],
     buttons: [
       { key: 'Enter', label: 'Сохранить', fn: () => submitSettings(f) },
@@ -792,7 +942,7 @@ function openSettings() {
     ],
     submit: () => submitSettings(f),
   };
-  f.info = () => ['', 'О приложении', `  Версия: ${VERSION}`];
+  f.info = () => ['', 'Значки: «авто» — Unicode на Windows, Nerd Font на Linux/macOS; без Nerd Font выберите Unicode', '', 'О приложении', `  Версия: ${VERSION}`];
   openForm(f);
 }
 function submitSettings(f) {
@@ -807,6 +957,8 @@ function submitSettings(f) {
   db.kubeconfigDir = dir;
   const lang = fval(f, 'lang');
   if (lang === 'ru' || lang === 'en') { db.lang = lang; UILANG = lang; }
+  const ic = fval(f, 'icons');
+  if (ICON_MODES.includes(ic)) { db.icons = ic; applyIcons(); }
   saveDb(); closeForm();
 }
 function openKubeDirForm() {
@@ -832,7 +984,7 @@ function openKubeDirForm() {
 
 function renderForm() {
   const f = ui.form, rows = [];
-  rows.push(new Row(0).add(' ' + f.title + ' ', C.title).fill(C.title));
+  rows.push(new Row(0).add(` ${IC.brand} BFTPort `, C.title).add(' ' + f.title + ' ', C.chip).fill());
   rows.push(new Row(1).fill());
   const labelW = 18, boxW = Math.max(20, Math.min(64, W - labelW - 6));
   f.fields.forEach((fl, i) => {
@@ -907,7 +1059,7 @@ function filtered(p) {
 }
 function renderPicker() {
   const p = ui.picker, rows = [];
-  rows.push(new Row(0).add(' ' + p.title + ' ', C.title).fill(C.title));
+  rows.push(new Row(0).add(` ${IC.brand} BFTPort `, C.title).add(' ' + p.title + ' ', C.chip).fill());
   const fr = new Row(1).add('  Фильтр: ', C.dim);
   addInput(fr, p, 'filter', 'fpos', 'foff', Math.max(10, Math.min(60, W - 16)), C.input, true);
   rows.push(fr.fill());
@@ -1163,11 +1315,13 @@ function lvRestore(lv, a) {
   const maxTop = Math.max(0, L.total - L.n), newTop = Math.min(maxTop, L.rowStart[at] + Math.min(inner, span - 1));
   lv.scroll = Math.max(0, maxTop - newTop);
 }
-function cycleFmt(lv) { // по кругу: как есть -> logback -> logback + JSON
+function setFmt(lv, i) {
+  if (lv.fmt === i) return;
   const a = lvAnchor(lv);
-  lv.fmt = (lv.fmt + 1) % 3; lv.fmtGen++;
+  lv.fmt = i; lv.fmtGen++;
   lvRestore(lv, a);
 }
+function cycleFmt(lv) { setFmt(lv, (lv.fmt + 1) % 3); } // по кругу: как есть -> logback -> logback + JSON
 
 function formatLog(text) {
   const f = parseLogJson(text);
@@ -1229,7 +1383,7 @@ async function podToFavorite(p) {
   }
   const have = db.services.find(x => x.namespace === p.ns && x.service === svc.metadata.name);
   if (have) {
-    gotoTab('all'); ui.sel = Math.max(0, db.services.indexOf(have)); ui.off = 0;
+    gotoTab('all'); selectSvc(have); ui.off = 0;
     flash(`«${D(have.name)}» уже в избранном`); return draw();
   }
   let port = svc.spec.ports[0];
@@ -1365,8 +1519,8 @@ function podFwd(p) {
   if (e && (isActive(e) || rt(e).status === 'error')) { const r = rt(e); return { text: `⇄ :${e.localPort}${r.status === 'running' ? '' : ' ' + STATUS[r.status][2]}`, status: r.status }; }
   const favs = favsFor(p);
   const f = favs.find(isActive) || favs.find(x => rt(x).status === 'error');
-  if (f) { const r = rt(f); return { text: `★ ${f.name} :${f.localPort}${r.status === 'running' ? '' : ' ' + STATUS[r.status][2]}`, status: r.status }; }
-  if (favs.length) return { text: '★ ' + favs.map(x => x.name).join(', '), status: 'stopped' };
+  if (f) { const r = rt(f); return { text: `${IC.fav} ${f.name} :${f.localPort}${r.status === 'running' ? '' : ' ' + STATUS[r.status][2]}`, status: r.status }; }
+  if (favs.length) return { text: IC.fav + ' ' + favs.map(x => x.name).join(', '), status: 'stopped' };
   return null;
 }
 
@@ -1400,59 +1554,48 @@ async function refreshPods() {
 // на большом кластере не дёргаем API-сервер часто: пауза между обновлениями растёт вместе со временем загрузки
 setInterval(() => { if (ui.tab === 'cluster' && ui.mode === 'list' && !ui.searching && Date.now() - ui.pods.at > Math.max(8000, (ui.pods.dur || 0) * 8)) refreshPods(); }, 4000);
 
+const podIcon = col => col === C.green ? IC.running : col === C.red ? IC.error : col === C.yellow ? IC.starting : IC.stopped;
+function podPanel(cur, btns) {
+  const L = [];
+  if (!cur) return [pLabel('Выберите под')];
+  const e = podDet.get(podKey(cur)), d = e && e.d, col = podColor(cur);
+  L.push([[cur.name, C.bold, undefined, true]]);
+  L.push([[podIcon(col) + ' ' + cur.status, col || '', undefined, true], [` · ${cur.ready}/${cur.total} · `, C.dim, undefined, true], [cur.age, C.dim, undefined, true]]);
+  const favs = favsFor(cur);
+  if (favs.length) {
+    L.push([]); L.push(pLabel(IC.fav + ' ИЗБРАННОЕ'));
+    for (const f of favs) {
+      L.push([[f.name, C.fav, undefined, true], [' ', ''], [`${f.namespace}/${f.service}`, C.dim, undefined, true]]);
+      const r = rt(f), st = STATUS[r.status];
+      L.push([[st[0] + ' ' + st[2], st[1]], [` :${f.localPort} → ${f.remotePort}`, C.dim, undefined, true]]);
+    }
+  }
+  L.push([]); L.push(pLabel('УЗЕЛ / IP'));
+  L.push([[`${cur.node || '—'}`, '', undefined, true], [` · ${cur.ip || '—'}`, C.dim, undefined, true]]);
+  L.push([]); L.push(pLabel('ПЕРЕЗАПУСКИ'));
+  L.push([[cur.restartsText, cur.restarts ? C.yellow : '', undefined, true]]);
+  if (d && d.created) { L.push([]); L.push(pLabel('СОЗДАН')); L.push([[fmtStart(d.created), '', undefined, true]]); }
+  L.push([]); L.push(pLabel('КОНТЕЙНЕРЫ'));
+  if (d) {
+    for (const c of d.containers) {
+      const ports = d.ports.filter(x => x.container === c).map(x => `${x.port}/${x.protocol}${x.name ? ' (' + x.name + ')' : ''}`);
+      L.push([['• ' + c, '', undefined, true]]);
+      L.push([[ports.length ? '  ' + ports.join(', ') : '  порты не объявлены', C.dim, undefined, !!ports.length]]);
+    }
+  } else L.push([[e && e.err ? 'не удалось получить подробности' : 'загрузка подробностей…', C.dim]]);
+  L.push([]);
+  L.push(pChips([['Enter', btns[0].label, btns[0].fn, true]]));
+  const lg = btns.find(b => b.key === 'L'), fv = btns.find(b => b.key === 'F'), pd = btns.find(b => b.key === 'P');
+  L.push(pChips([...(pd ? [['P', 'Напрямую', pd.fn]] : []), ['L', 'Логи', lg.fn]]));
+  L.push(pChips([['F', 'В избранное', fv.fn]]));
+  return L;
+}
+
 function renderCluster(rows) {
   const P = ui.pods, ps = podsVisible();
-  const nsW = Math.max(10, Math.min(24, Math.floor(W * 0.16)));
-  const nameW = Math.max(12, W - (1 + 3 + nsW + 1) - 7 - 17 - 5 - 8 - 10);
-  const h = new Row(2);
-  h.add('    ', C.head).add(trunc('NAMESPACE', nsW) + ' ', C.head).add(trunc(tr('ИМЯ'), nameW) + ' ', C.head).add(trunc('READY', 6) + ' ', C.head)
-    .add(trunc(tr('СТАТУС'), 16) + ' ', C.head).add(trunc(tr('РЕСТ'), 4) + ' ', C.head).add(trunc(tr('ВОЗРАСТ'), 7) + ' ', C.head).add(tr('ПРОБРОС'), C.head).fill(C.head);
-  rows.push(h);
-  const logH = Math.max(3, Math.min(10, Math.floor(H * 0.3)));
-  const listH = Math.max(3, H - 6 - logH);
+  const PW = W >= 140 ? panelW() : 0, LW = PW ? W - PW - 1 : W;
   if (ui.psel >= ps.length) ui.psel = Math.max(0, ps.length - 1);
-  if (ui.psel < ui.poff) ui.poff = ui.psel;
-  if (ui.psel >= ui.poff + listH) ui.poff = ui.psel - listH + 1;
   const cur = ps[ui.psel];
-  ui.pkey = cur ? podKey(cur) : '';
-  wantDetail(cur);
-  for (let i = 0; i < listH; i++) {
-    const row = new Row(3 + i), p = ps[ui.poff + i];
-    if (!p) {
-      if (i === 1 && !ps.length) {
-        if (P.err) row.add('  ' + P.err, C.red);
-        else if (!P.at) row.add(P.loading ? '  Загрузка подов из кластера…' : '  Нет данных', C.yellow);
-        else row.add(ui.query ? '  Ничего не найдено по запросу' : '  В выбранном namespace нет подов', C.dim);
-      } else if (i === 2 && !ps.length && P.err) row.add('  N — выбрать namespace (если нет прав на весь кластер) · R — повторить · K — другой конфиг', C.gray);
-      row.fill(); rows.push(row); continue;
-    }
-    const idx = ui.poff + i, bg = idx === ui.psel ? C.sel : '', click = () => onPodClick(idx), col = podColor(p);
-    const fw = podFwd(p);
-    row.add(idx === ui.psel ? '▌' : ' ', C.yellow + bg, click).add(' ● ', col + bg, click)
-      .add(trunc(p.ns, nsW) + ' ', C.dim + bg, click, true).add(trunc(p.name, nameW) + ' ', C.bold + bg, click, true)
-      .add(trunc(`${p.ready}/${p.total}`, 6) + ' ', (p.ready === p.total ? '' : C.yellow) + bg, click)
-      .add(trunc(p.status, 16) + ' ', col + bg, click).add(trunc(String(p.restarts), 4) + ' ', (p.restarts ? C.yellow : C.gray) + bg, click)
-      .add(trunc(p.age, 7) + ' ', C.gray + bg, click)
-      .add(trunc(fw ? fw.text : '', Math.max(0, W - row.x)), (!fw || fw.status === 'stopped' ? C.gray : fw.status === 'error' ? C.red : fw.status === 'running' ? C.green : C.yellow) + bg, click);
-    row.fill(bg); rows.push(row);
-  }
-  const nsLabel = P.ns ? 'namespace: ' + P.ns : 'все namespace';
-  const upd = P.at ? new Date(P.at).toTimeString().slice(0, 8) : '—';
-  rows.push(new Row(3 + listH).add(` Детали${cur ? ': ' + podKey(cur) : ''} `, C.head)
-    .add(` ${ps.length}/${P.list.length} подов · ${nsLabel} · обновлено ${upd}${P.loading ? ' · обновление…' : ''} · только просмотр `, C.head).fill(C.head));
-  const det = [];
-  if (cur) {
-    const e = podDet.get(podKey(cur)), d = e && e.d;
-    det.push(`узел: ${cur.node || '—'}   IP: ${cur.ip || '—'}   возраст: ${cur.age}   перезапусков: ${cur.restartsText}${d && d.created ? '   создан: ' + fmtStart(d.created) : ''}`);
-    for (const f of favsFor(cur)) det.push(`★ избранное: ${D(f.name)} (${f.namespace}/${f.service})  :${f.localPort} → ${f.remotePort}  · ${STATUS[rt(f).status][2]}`);
-    if (d) {
-      for (const c of d.containers) {
-        const ports = d.ports.filter(x => x.container === c).map(x => `${x.port}/${x.protocol}${x.name ? ' (' + x.name + ')' : ''}`);
-        det.push(`• ${c}   ${ports.length ? 'порты: ' + ports.join(', ') : 'порты не объявлены'}`);
-      }
-    } else det.push(e && e.err ? 'не удалось получить подробности: ' + e.err : 'загрузка подробностей…');
-  }
-  for (let i = 0; i < logH; i++) rows.push(new Row(4 + listH + i).add(det[i] ? ' ' + det[i] : '', i === 0 ? '' : C.dim).fill());
   const fs2 = cur && eph.get(podKey(cur)), favs2 = cur ? favsFor(cur) : [];
   const anyOn = (fs2 && isActive(fs2)) || favs2.some(isActive);
   const btns = [
@@ -1467,7 +1610,74 @@ function renderCluster(rows) {
     { key: 'K', label: 'Конфиг', fn: () => switchKubeconfig() },
     { key: 'Q', label: 'Выход', fn: () => quit() },
   ];
-  for (const r of buttonRows(4 + listH + logH, btns)) { r.fill(); rows.push(r); }
+  const nb = btnCount(btns, PALETTE_HINT);
+  const logH = PW ? 0 : Math.max(3, Math.min(6, Math.floor(H * 0.2)));
+  const listH = Math.max(3, H - 5 - nb - (PW ? 0 : logH + 1));
+  const pl = PW ? podPanel(cur, btns) : null;
+  const mk = y => { const r = new Row(y); if (PW) r.lim = LW; return r; };
+  const done = (r, bg) => { r.fill(bg); if (PW) addPanel(r, pl[r.y - 3]); rows.push(r); };
+
+  // фильтр namespace и пометка «только просмотр»
+  const fr = new Row(2).add(' Namespace ', C.dim);
+  fr.add(' ' + (P.ns ? '' : 'все') , C.chip, () => chooseNamespace());
+  if (P.ns) fr.add(P.ns, C.chip, () => chooseNamespace(), true);
+  fr.add(' ', C.chip, () => chooseNamespace()).add('  N — выбрать', C.dim, () => chooseNamespace());
+  const ro = ` ${IC.view} только просмотр `;
+  if (W - fr.x > tr(ro).length + 1) fr.add(' '.repeat(W - fr.x - tr(ro).length - 1), '').add(ro, C.dim);
+  rows.push(fr.fill());
+
+  const nsW = Math.max(10, Math.min(24, Math.floor(LW * 0.16)));
+  const nameW = Math.max(12, LW - (4 + nsW + 1) - 7 - 17 - 5 - 8 - 10);
+  const h = mk(3);
+  h.add('    ', C.head).add(trunc('NAMESPACE', nsW) + ' ', C.head).add(trunc(tr('ИМЯ'), nameW) + ' ', C.head).add(trunc('READY', 6) + ' ', C.head)
+    .add(trunc(tr('СТАТУС'), 16) + ' ', C.head).add(trunc(tr('РЕСТ'), 4) + ' ', C.head).add(trunc(tr('ВОЗРАСТ'), 7) + ' ', C.head).add(tr('ПРОБРОС'), C.head);
+  done(h, C.head);
+  if (ui.psel < ui.poff) ui.poff = ui.psel;
+  if (ui.psel >= ui.poff + listH) ui.poff = ui.psel - listH + 1;
+  ui.pkey = cur ? podKey(cur) : '';
+  wantDetail(cur);
+  for (let i = 0; i < listH; i++) {
+    const row = mk(4 + i), p = ps[ui.poff + i];
+    if (!p) {
+      if (i === 1 && !ps.length) {
+        if (P.err) row.add('  ' + P.err, C.red);
+        else if (!P.at) row.add(P.loading ? '  Загрузка подов из кластера…' : '  Нет данных', C.yellow);
+        else row.add(ui.query ? '  Ничего не найдено по запросу' : '  В выбранном namespace нет подов', C.dim);
+      } else if (i === 2 && !ps.length && P.err) row.add('  N — выбрать namespace (если нет прав на весь кластер) · R — повторить · K — другой конфиг', C.gray);
+      done(row); continue;
+    }
+    const idx = ui.poff + i, bg = idx === ui.psel ? C.sel : '', click = () => onPodClick(idx), col = podColor(p);
+    const fw = podFwd(p);
+    row.add(idx === ui.psel ? '▌' : ' ', C.acc + bg, click).add(' ' + podIcon(col) + ' ', col + bg, click)
+      .add(trunc(p.ns, nsW) + ' ', C.dim + bg, click, true).add(trunc(p.name, nameW) + ' ', C.bold + bg, click, true)
+      .add(trunc(`${p.ready}/${p.total}`, 6) + ' ', (p.ready === p.total ? '' : C.yellow) + bg, click)
+      .add(trunc(p.status, 16) + ' ', col + bg, click).add(trunc(String(p.restarts), 4) + ' ', (p.restarts ? C.yellow : C.gray) + bg, click)
+      .add(trunc(p.age, 7) + ' ', C.gray + bg, click)
+      .add(trunc(fw ? fw.text : '', Math.max(0, (row.lim === undefined ? W : row.lim) - row.x)), (!fw || fw.status === 'stopped' ? C.gray : fw.status === 'error' ? C.red : fw.status === 'running' ? C.green : C.yellow) + bg, click);
+    done(row, bg);
+  }
+  const nsLabel = P.ns ? 'namespace: ' + P.ns : 'все namespace';
+  const upd = P.at ? new Date(P.at).toTimeString().slice(0, 8) : '—';
+  if (!PW) {
+    rows.push(new Row(4 + listH).add(` Детали${cur ? ': ' + podKey(cur) : ''} `, C.head)
+      .add(` ${ps.length}/${P.list.length} подов · ${nsLabel} · обновлено ${upd}${P.loading ? ' · обновление…' : ''} `, C.head).fill(C.head));
+    const det = [];
+    if (cur) {
+      const e = podDet.get(podKey(cur)), d = e && e.d;
+      det.push(`узел: ${cur.node || '—'}   IP: ${cur.ip || '—'}   возраст: ${cur.age}   перезапусков: ${cur.restartsText}${d && d.created ? '   создан: ' + fmtStart(d.created) : ''}`);
+      for (const f of favsFor(cur)) det.push(`★ избранное: ${D(f.name)} (${f.namespace}/${f.service})  :${f.localPort} → ${f.remotePort}  · ${STATUS[rt(f).status][2]}`);
+      if (d) {
+        for (const c of d.containers) {
+          const ports = d.ports.filter(x => x.container === c).map(x => `${x.port}/${x.protocol}${x.name ? ' (' + x.name + ')' : ''}`);
+          det.push(`• ${c}   ${ports.length ? 'порты: ' + ports.join(', ') : 'порты не объявлены'}`);
+        }
+      } else det.push(e && e.err ? 'не удалось получить подробности: ' + e.err : 'загрузка подробностей…');
+    }
+    for (let i = 0; i < logH; i++) rows.push(new Row(5 + listH + i).add(det[i] ? ' ' + det[i] : '', i === 0 ? '' : C.dim).fill());
+  }
+  for (const r of buttonRows(4 + listH + (PW ? 0 : logH + 1), btns, PALETTE_HINT)) rows.push(r);
+  // сводка по подам — в строке состояния
+  P.summary = `${ps.length}/${P.list.length} подов · ${nsLabel} · обновлено ${upd}${P.loading ? ' · обновление…' : ''}`;
   return rows;
 }
 function onPodClick(idx) {
@@ -2075,14 +2285,14 @@ function lvStyle(l) {
 function renderLogs() {
   const lv = ui.lv, rows = [], s = lv.svc;
   const n = Math.max(3, H - 4), width = Math.max(10, W - 2);
-  const head = new Row(0).add(` Логи: ${D(s.name)} `, C.title);
-  if (lv.mode === 'all') head.add(` ⎈ все поды (${lv.podCount}) `, C.title);
+  const head = new Row(0).add(` ${IC.brand} BFTPort `, C.title).add(` Логи: ${D(s.name)} `, C.chip);
+  if (lv.mode === 'all') head.add(` ${IC.pod} все поды (${lv.podCount}) `, C.chip);
   else if (lv.podName) {
-    head.add(` ⎈ ${lv.podName} `, C.title);
-    if (s.kind === 'pod' && lv.podInfo && lv.podInfo.containers > 1) head.add(` [${lv.container || lv.podInfo.container}] `, C.title);
-    if (lv.podInfo && lv.podInfo.start) head.add(` запущен ${fmtStart(lv.podInfo.start)} `, C.title);
-  } else head.add(` ${s.namespace}/${s.service} `, C.title);
-  rows.push(head.fill(C.title));
+    head.add(` ${IC.pod} ${lv.podName} `, C.chip);
+    if (s.kind === 'pod' && lv.podInfo && lv.podInfo.containers > 1) head.add(` [${lv.container || lv.podInfo.container}] `, C.dim);
+    if (lv.podInfo && lv.podInfo.start) head.add(` запущен ${fmtStart(lv.podInfo.start)} `, C.dim);
+  } else head.add(` ${s.namespace}/${s.service} `, C.chip);
+  rows.push(head.fill());
 
   const lines = lvSource(lv);
   let total = 0;
@@ -2095,7 +2305,7 @@ function renderLogs() {
   if (lv.sel && !selR) lv.sel = null;
 
   const tb = new Row(1).add(' ');
-  const srcBtn = (id, label) => tb.add(` ${label} `, lv.src === id ? C.key : C.btn, () => { lv.src = id; lv.scroll = 0; draw(); }).add(' ');
+  const srcBtn = (id, label) => tb.add(` ${label} `, lv.src === id ? C.key : C.dim, () => { lv.src = id; lv.scroll = 0; draw(); }).add(' ');
   srcBtn('pod', '1 Под'); srcBtn('pf', '2 Port-forward');
   tb.add(lv.scroll > 0 ? ' ⏸ пауза ' : ' ● live ', lv.scroll > 0 ? C.yellow : C.green, () => { lv.scroll = 0; draw(); });
   tb.add(` ${lines.length} строк `, C.dim);
@@ -2114,6 +2324,14 @@ function renderLogs() {
   if (lv.exp) tb.add(` ⇩ экспорт: ${lv.exp.lines} строк… `, C.yellow);
   if (Date.now() < lv.noteUntil) tb.add(' ' + lv.note, lv.noteBad ? C.red : C.green);
   else if (lv.src === 'pod') tb.add(' ' + lv.msg, lv.proc ? C.gray : C.yellow);
+  // переключатель вида справа (если хватает места): как есть | logback | logback + JSON
+  const fmts = ['Как есть', 'logback', 'logback + JSON'];
+  const segW = fmts.reduce((n, t) => n + tr(t).length + 2, 0) + 2;
+  if (W - tb.x > segW + 1) {
+    tb.add(' '.repeat(W - tb.x - segW), '');
+    fmts.forEach((t, i) => tb.add(` ${t} `, lv.fmt === i ? C.accBg + C.bold : C.chip, () => { setFmt(lv, i); draw(); }));
+    tb.add(' ', '');
+  }
   tb.fill(); rows.push(tb);
 
   // собираем n нижних экранных строк с учётом прокрутки и переноса
@@ -2259,6 +2477,7 @@ function onTokens(str) {
     else if (t === '\x01') e = { k: 'home' };
     else if (t === '\x05') e = { k: 'end' };
     else if (t === '\x06') e = { k: 'ctrl-f' };
+    else if (t === '\x10') e = { k: 'ctrl-p' };
     else if (t === ' ') e = { k: 'space' };
     else if (t >= ' ' && t[0] !== '\x1b') e = { k: 'char', ch: t };
     else continue;
@@ -2280,6 +2499,32 @@ function onMouse(b, x, y, press) {
     if (h.y === y && x >= h.x1 && x <= h.x2) { h.fn(); return; }
   }
 }
+// Палитра команд: поиск по действиям текущей вкладки; не заменяет клавиши, а дополняет их
+async function openPalette() {
+  if (ui.mode !== 'list') return;
+  const isG = ui.tab === 'groups', isC = ui.tab === 'cluster';
+  const cur = isG ? null : isC ? podsVisible()[ui.psel] : curSvc();
+  const A = [];
+  const add = (label, key, fn) => A.push({ label: `${tr(label).padEnd(44)} ${key}`, value: fn });
+  [['Избранное', '1', 'all'], ['Запущенные', '2', 'running'], ['Шаблоны', '3', 'groups'], ['Кластер', '4', 'cluster']].forEach(([n, k, t]) =>
+    add('Перейти на вкладку: ' + n, k, () => { enterTab(t); ui.sel = 0; ui.off = 0; ui.gsel = 0; ui.goff = 0; ui.psel = 0; ui.poff = 0; ui.pkey = ''; if (t === 'cluster') refreshPods(); }));
+  if (isG) { add('Создать шаблон', 'A', () => openGroupForm()); const g = curGroup(); if (g) { add('Запустить / остановить набор', 'Enter', () => toggleGroup(g)); add('Изменить шаблон', 'E', () => openGroupForm(g)); add('Удалить шаблон', 'D', () => askDeleteGroup()); } }
+  else if (isC) {
+    if (cur) { add('Проброс порта / стоп проброса', 'Enter', () => podAction()); add('Проброс напрямую к поду', 'P', () => directForward(cur)); add('Логи пода', 'L', () => openPodLogs(cur)); add('Перенести в избранное', 'F', () => podToFavorite(cur)); }
+    add('Выбрать namespace', 'N', () => chooseNamespace()); add('Обновить список подов', 'R', () => refreshPods());
+  } else {
+    add('Добавить сервис', 'A', () => openServiceForm());
+    if (cur) { add('Старт / стоп выбранного сервиса', 'Enter', () => toggle()); add('Изменить сервис', 'E', () => editService(cur)); add('Удалить сервис', 'D', () => askDelete()); add('Логи пода', 'L', () => openLogs()); }
+    add('Запустить все видимые', 'S', () => visible().forEach(start)); add('Остановить все видимые', 'X', () => { visible().forEach(stop); });
+    add('Сохранить запущенные как шаблон', 'G', () => saveRunningAsGroup());
+  }
+  add('Поиск', '/', () => { ui.searching = true; });
+  add('Выбрать kubeconfig', 'K', () => switchKubeconfig());
+  add('Настройки', 'O', () => openSettings());
+  add('Выход', 'Q', () => quit());
+  const fn = await pick('Команды', A);
+  if (typeof fn === 'function') { fn(); draw(); }
+}
 function onKey(e) {
   if (e.k === 'ctrl-v') { readClipboard(t => { const text = cleanPaste(t); if (text) onKey({ k: 'paste', text }); }); return; }
   if (ui.mode === 'form') return formKey(e);
@@ -2291,6 +2536,7 @@ function onKey(e) {
     if (e.k === 'esc' || ch === 'n') return closeConfirm();
     return;
   }
+  if (e.k === 'ctrl-p') return openPalette();
   const isG = ui.tab === 'groups', isC = ui.tab === 'cluster';
   const sk = isG ? 'gsel' : isC ? 'psel' : 'sel';
   const n = isG ? groupsVisible().length : isC ? podsVisible().length : visible().length;
@@ -2443,7 +2689,9 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
                  пода (Enter; если под относится к сервису из избранного — запускается он, на своём порту),
                  напрямую к поду (P), логи (L), в избранное (F), смена namespace (N), обновление (R)
   K              выбор kubeconfig из папки (F2 в списке — сменить папку)
-  O              настройки (папка kubeconfig, язык, о приложении)
+  O              настройки (папка kubeconfig, язык, значки, о приложении)
+  Ctrl+P         палитра команд: поиск по действиям вкладки (клавиши остаются прежними)
+  Значки         авто / Unicode / Nerd Font / ASCII — в настройках или BFTPORT_ICONS=unicode|nerd|ascii
   Q / Ctrl+C     выход (пробросы останавливаются)
 
 ШАБЛОНЫ
