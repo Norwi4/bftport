@@ -20,7 +20,7 @@ npm install -g git+https://<gitlab-хост>/<группа>/bftport.git
 npm install -g git+ssh://git@<gitlab-хост>/<группа>/bftport.git
 ```
 
-Обновление — та же команда. Удаление: `npm uninstall -g bftport`.
+Обновление: `bftport --update` сравнит установленную версию с репозиторием и обновится, если есть новее (или сообщит, что версия актуальна). Нужен `git` с доступом к репозиторию. Удаление: `npm uninstall -g bftport`.
 
 Проверка: `bftport --version`, `bftport --help` (покажет, куда установлено и где лежит база).
 

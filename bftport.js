@@ -4,7 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const net = require('net');
-const { spawn, execFile } = require('child_process');
+const { spawn, spawnSync, execFile, execFileSync } = require('child_process');
 
 const DB_DIR = path.join(require('os').homedir(), '.bftport');
 const DB_FILE = path.join(DB_DIR, 'services.json');
@@ -825,12 +825,42 @@ function enableConsoleMouse() {
 if (process.argv.includes('--version') || process.argv.includes('-v')) {
   console.log(require('./package.json').version); process.exit(0);
 }
+if (process.argv.includes('--update')) {
+  const pkg = require('./package.json');
+  const repo = (pkg.repository && pkg.repository.url) || '';
+  if (!repo) { console.error('В package.json не указан repository.url'); process.exit(1); }
+  const cmp = (a, b) => { const x = a.split('.').map(Number), y = b.split('.').map(Number); for (let i = 0; i < 3; i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d > 0 ? 1 : -1; } return 0; };
+  console.log(`Установлена версия ${pkg.version}. Проверяю ${repo.replace(/^git\+/, '')} …`);
+  const tmp = fs.mkdtempSync(path.join(require('os').tmpdir(), 'bftport-'));
+  let remote;
+  try {
+    execFileSync('git', ['clone', '--depth', '1', '--quiet', repo.replace(/^git\+/, ''), path.join(tmp, 'r')],
+      { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, timeout: 60000 });
+    remote = JSON.parse(fs.readFileSync(path.join(tmp, 'r', 'package.json'), 'utf8')).version;
+  } catch (e) {
+    const why = String(e.stderr || e.message).trim().split('\n').pop();
+    console.error(`Не удалось получить версию из репозитория: ${why}`);
+    console.error('Проверьте доступ к репозиторию (git clone должен работать без ввода пароля) и наличие git в PATH.');
+    process.exit(1);
+  } finally {
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) {}
+  }
+  const c = cmp(remote, pkg.version);
+  if (c === 0) { console.log(`Установлена актуальная версия (${pkg.version}).`); process.exit(0); }
+  if (c < 0) { console.log(`Установленная версия (${pkg.version}) новее, чем в репозитории (${remote}). Обновление не требуется.`); process.exit(0); }
+  console.log(`Доступна версия ${remote}. Обновляю…\n`);
+  const r = spawnSync('npm', ['install', '-g', repo], { stdio: 'inherit', shell: process.platform === 'win32' });
+  if (r.status !== 0) { console.error('\nОбновление не удалось (код ' + r.status + ').'); process.exit(r.status || 1); }
+  console.log(`\nГотово: bftport ${remote}. Ваши сервисы и шаблоны не затронуты.`);
+  process.exit(0);
+}
 if (process.argv.includes('--help') || process.argv.includes('-h')) {
   console.log(`bftport ${require('./package.json').version} — менеджер kubectl port-forward
 
 ИСПОЛЬЗОВАНИЕ
   bftport             запустить интерфейс (нужен интерактивный терминал)
   bftport --keys      диагностика ввода: показывает клавиши и клики мыши
+  bftport --update    проверить новую версию в репозитории и обновиться
   bftport --version   версия
   bftport --help      эта справка
 
