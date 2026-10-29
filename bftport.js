@@ -15,6 +15,7 @@ if (!fs.existsSync(DB_FILE)) {
   if (fs.existsSync(seed)) fs.copyFileSync(seed, DB_FILE);
 }
 const LOG_MAX = 300;
+const VERSION = require('./package.json').version;
 
 // ───────────────────────── база ─────────────────────────
 let db = loadDb();
@@ -361,7 +362,7 @@ function renderList() {
   const running = db.services.filter(s => rt(s).status === 'running').length;
   const activeN = db.services.filter(isActive).length;
   const t = new Row(0);
-  t.add(' ⇄ Port Forwards ', C.title).add(` ${db.services.length} сервисов · ${running} работает `, C.title);
+  t.add(` ⇄ Port Forwards v${VERSION} `, C.title).add(` ${db.services.length} сервисов · ${running} работает `, C.title);
   const kc = db.kubeconfig ? path.basename(db.kubeconfig) : 'kubeconfig не задан (K)';
   const right = ` ${kc} `;
   if (W - t.x > right.length) t.add(' '.repeat(W - t.x - right.length), C.title).add(right, C.title, () => openKubeconfigForm());
