@@ -1,0 +1,59 @@
+{
+  "kubeconfig": "",
+  "services": [
+    {
+      "name": "transact-manager",
+      "namespace": "ps",
+      "service": "transact-manager",
+      "localPort": 13000,
+      "remotePort": "grpc",
+      "kubeconfig": "",
+      "autostart": false
+    },
+    {
+      "name": "noble-registry",
+      "namespace": "ps",
+      "service": "noble-registry-service",
+      "localPort": 12089,
+      "remotePort": "grpc",
+      "kubeconfig": "",
+      "autostart": false
+    },
+    {
+      "name": "idempotence-manager",
+      "namespace": "ps",
+      "service": "idempotence-manager",
+      "localPort": 16035,
+      "remotePort": "grpc",
+      "kubeconfig": "",
+      "autostart": false
+    },
+    {
+      "name": "gen-number-doc",
+      "namespace": "ecp",
+      "service": "generate-number-document-service",
+      "localPort": 50711,
+      "remotePort": "grpc",
+      "kubeconfig": "",
+      "autostart": false
+    },
+    {
+      "name": "authz",
+      "namespace": "ps",
+      "service": "authz",
+      "localPort": 10198,
+      "remotePort": "grpc",
+      "kubeconfig": "",
+      "autostart": false
+    },
+    {
+      "name": "vziskaniya-or-agg",
+      "namespace": "ecp",
+      "service": "vziskaniya-or-agg",
+      "localPort": 28800,
+      "remotePort": "grpc",
+      "kubeconfig": "",
+      "autostart": false
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "name": "bftport",
+  "version": "1.0.0",
+  "description": "Интерактивный менеджер kubectl port-forward",
+  "bin": {
+    "bftport": "bftport.js"
+  },
+  "files": [
+    "bftport.js",
+    "seed.json",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "UNLICENSED",
+  "private": true,
+  "keywords": [
+    "kubectl",
+    "port-forward",
+    "tui"
+  ]
+}
