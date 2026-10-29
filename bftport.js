@@ -164,7 +164,7 @@ const ui = {
 };
 let W = 80, H = 24, hits = [];
 
-const LAT = { 'й': 'q', 'ф': 'a', 'у': 'e', 'в': 'd', 'ы': 's', 'ч': 'x', 'л': 'k', 'н': 'y', 'т': 'n', 'ш': 'i', 'п': 'g', 'д': 'l', 'ц': 'w', 'к': 'r', 'с': 'c' };
+const LAT = { 'й': 'q', 'ф': 'a', 'у': 'e', 'в': 'd', 'ы': 's', 'ч': 'x', 'л': 'k', 'н': 'y', 'т': 'n', 'ш': 'i', 'п': 'g', 'д': 'l', 'ц': 'w', 'к': 'r', 'с': 'c', 'з': 'p', 'а': 'f' };
 
 // стили
 const RS = '\x1b[0m';
@@ -179,6 +179,64 @@ const STATUS = {
   running: ['●', C.green, 'работает'], starting: ['◐', C.yellow, 'запуск…'], restarting: ['↻', C.yellow, 'рестарт'],
   error: ['✖', C.red, 'ошибка'], stopped: ['○', C.gray, 'стоп'],
 };
+
+// ───────────────────────── ввод текста: курсор и вставка ─────────────────────────
+const isSep = ch => /[\s\\\/.:_-]/.test(ch);
+function wordLeft(v, p) { let i = p; while (i > 0 && isSep(v[i - 1])) i--; while (i > 0 && !isSep(v[i - 1])) i--; return i; }
+function wordRight(v, p) { let i = p; while (i < v.length && isSep(v[i])) i++; while (i < v.length && !isSep(v[i])) i++; return i; }
+// Правит строку o[vk] с курсором o[pk]. Возвращает true, если клавиша обработана как редактирование.
+function edit(o, vk, pk, e, digits) {
+  let v = String(o[vk]), p = o[pk];
+  if (p === undefined || p > v.length) p = v.length;
+  if (p < 0) p = 0;
+  const ins = t => { if (digits) t = t.replace(/\D/g, ''); v = v.slice(0, p) + t + v.slice(p); p += t.length; };
+  switch (e.k) {
+    case 'left': p = Math.max(0, p - 1); break;
+    case 'right': p = Math.min(v.length, p + 1); break;
+    case 'wleft': p = wordLeft(v, p); break;
+    case 'wright': p = wordRight(v, p); break;
+    case 'home': p = 0; break;
+    case 'end': p = v.length; break;
+    case 'bs': if (p > 0) { v = v.slice(0, p - 1) + v.slice(p); p--; } break;
+    case 'del': v = v.slice(0, p) + v.slice(p + 1); break;
+    case 'ctrl-w': { const i = wordLeft(v, p); v = v.slice(0, i) + v.slice(p); p = i; break; }
+    case 'ctrl-u': v = ''; p = 0; break;
+    case 'space': ins(' '); break;
+    case 'char': ins(e.ch); break;
+    case 'paste': ins(e.text); break;
+    default: return false;
+  }
+  o[vk] = v; o[pk] = p;
+  return true;
+}
+// Рисует поле шириной width: окно по тексту следует за курсором, курсор — инвертированная клетка.
+function addInput(row, o, vk, pk, ok, width, style, active, fn) {
+  width = Math.max(2, width);
+  const v = String(o[vk]);
+  let pos = o[pk];
+  if (pos === undefined || pos > v.length) pos = v.length;
+  let off = o[ok] || 0;
+  if (pos < off) off = pos;
+  if (pos > off + width - 1) off = pos - width + 1;
+  off = Math.max(0, Math.min(off, Math.max(0, v.length - width + 1)));
+  o[ok] = off;
+  const view = v.slice(off, off + width), cp = pos - off;
+  if (!active) { row.add(view.padEnd(width), style, fn); return; }
+  const at = view[cp] === undefined ? ' ' : view[cp];
+  row.add(view.slice(0, cp), style, fn).add(at, style + '\x1b[7m', fn).add(view.slice(cp + 1).padEnd(Math.max(0, width - cp - 1)), style, fn);
+}
+const cleanPaste = t => String(t).replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '').replace(/\r\n|\r|\n|\t/g, ' ').replace(/[\x00-\x1f\x7f]/g, '').trim();
+// запасной путь для терминалов, которые передают Ctrl+V как символ, а не вставляют сами
+function readClipboard(cb) {
+  const tries = process.platform === 'win32' ? [['powershell', ['-NoProfile', '-NonInteractive', '-Command', '[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-Clipboard -Raw']]]
+    : process.platform === 'darwin' ? [['pbpaste', []]]
+      : [['wl-paste', ['-n']], ['xclip', ['-selection', 'clipboard', '-o']], ['xsel', ['-b', '-o']]];
+  const next = i => {
+    if (i >= tries.length) return cb('');
+    execFile(tries[i][0], tries[i][1], { windowsHide: true, timeout: 5000, maxBuffer: 1 << 20, encoding: 'utf8' }, (err, out) => err ? next(i + 1) : cb(out || ''));
+  };
+  next(0);
+}
 
 class Row {
   constructor(y) { this.y = y; this.x = 0; this.out = ''; }
@@ -379,11 +437,13 @@ function renderList() {
   tb.add(' ');
   tab('all', `1 Все (${db.services.length})`); tab('running', `2 Запущенные (${activeN})`); tab('groups', `3 Шаблоны (${db.groups.length})`);
   tb.add('  ');
-  const qShown = ui.query + (ui.searching ? '▌' : '');
-  tb.add(' ⌕ ', ui.searching ? C.inputF : C.input, () => { ui.searching = true; draw(); });
+  const goSearch = () => { ui.searching = true; draw(); };
+  tb.add(' ⌕ ', ui.searching ? C.inputF : C.input, goSearch);
   const boxW = Math.max(10, Math.min(40, W - tb.x - 12));
-  tb.add(trunc(ui.query || ui.searching ? qShown : 'поиск: / или Ctrl+F', boxW) + ' ', ui.searching ? C.inputF : (ui.query ? C.input : C.input + C.gray), () => { ui.searching = true; draw(); });
-  if (ui.query) tb.add(' ✕ ', C.btn, () => { ui.query = ''; ui.searching = false; ui.sel = 0; ui.gsel = 0; draw(); });
+  const qs = ui.searching ? C.inputF : (ui.query ? C.input : C.input + C.gray);
+  if (ui.query || ui.searching) { tb.add(' ', qs, goSearch); addInput(tb, ui, 'query', 'qpos', 'qoff', boxW - 1, qs, ui.searching, goSearch); tb.add(' ', qs, goSearch); }
+  else tb.add(trunc('поиск: / или Ctrl+F', boxW) + ' ', qs, goSearch);
+  if (ui.query) tb.add(' ✕ ', C.btn, () => { ui.query = ''; ui.qpos = 0; ui.searching = false; ui.sel = 0; ui.gsel = 0; draw(); });
   if (ui.query) tb.add(` найдено: ${isG ? groupsVisible().length : svcs.length}`, C.dim);
   tb.fill(); rows.push(tb);
   if (isG) return renderGroups(rows);
@@ -499,7 +559,7 @@ function quit() { db.services.some(isActive) ? askQuit() : exit(); }
 function closeConfirm() { ui.mode = 'list'; ui.confirm = null; draw(); }
 function exit() {
   killAll();
-  process.stdout.write('\x1b[?1000l\x1b[?1006l\x1b[?7h\x1b[?25h\x1b[?1049l');
+  process.stdout.write('\x1b[?2004l\x1b[?1000l\x1b[?1006l\x1b[?7h\x1b[?25h\x1b[?1049l');
   try { process.stdin.setRawMode(false); } catch (_) {}
   process.exit(0);
 }
@@ -508,7 +568,7 @@ function exit() {
 function openForm(f) { ui.form = f; ui.mode = 'form'; draw(); }
 function closeForm() { ui.form = null; ui.mode = 'list'; draw(); }
 const fval = (f, k) => f.fields.find(x => x.key === k).value;
-const fset = (f, k, v) => { f.fields.find(x => x.key === k).value = v; };
+const fset = (f, k, v) => { const fl = f.fields.find(x => x.key === k); fl.value = v; fl.pos = undefined; };
 
 function openServiceForm(s) {
   const isNew = !s;
@@ -617,11 +677,11 @@ function renderForm() {
     if (fl.bool) {
       r.add(fl.value ? ' [x] ' : ' [ ] ', focus ? C.inputF : C.input, focusFn);
     } else {
-      let txt = String(fl.value);
-      const shown = txt.length > boxW - 2 ? '…' + txt.slice(-(boxW - 3)) : txt;
-      let body = shown + (focus ? '▌' : '');
-      if (!txt && !focus && fl.hint) { r.add((' ' + fl.hint).padEnd(boxW), C.input + C.gray, focusFn); }
-      else r.add((' ' + body).padEnd(boxW), focus ? C.inputF : C.input, focusFn);
+      const txt = String(fl.value), st = focus ? C.inputF : C.input;
+      r.add(' ', st, focusFn);
+      if (!txt && !focus && fl.hint) r.add(fl.hint.padEnd(boxW - 2).slice(0, boxW - 2), C.input + C.gray, focusFn);
+      else addInput(r, fl, 'value', 'pos', 'vs', boxW - 2, st, focus, focusFn);
+      r.add(' ', st, focusFn);
       if (focus && !txt && fl.hint) r.add(' ' + fl.hint, C.gray);
     }
     r.fill(); rows.push(r);
@@ -630,7 +690,7 @@ function renderForm() {
   rows.push(new Row(y0).add('  ' + (f.info ? f.info() : ''), C.sys).fill());
   rows.push(new Row(y0 + 1).add('  ' + f.err, C.red).fill());
   for (const r of buttonRows(y0 + 2, f.buttons)) { r.fill(); rows.push(r); }
-  rows.push(new Row(y0 + 4).add('  Tab/↑↓ — поля · Пробел — переключить галочку · Ctrl+U — очистить поле', C.gray).fill());
+  rows.push(new Row(y0 + 4).add('  Tab/↑↓ — поля · ←→ Home End — курсор · Ctrl+V — вставить · Ctrl+U — очистить · Пробел — галочка', C.gray).fill());
   return rows;
 }
 
@@ -643,17 +703,10 @@ function formKey(e) {
     case 'stab': case 'up': f.focus = (f.focus + n - 1) % n; break;
     case 'enter': return f.submit ? f.submit() : f.buttons[0].fn();
     case 'f2': if (f.buttons[1] && f.buttons[1].key === 'F2') return f.buttons[1].fn(); break;
-    case 'bs': if (!fl.bool) fl.value = String(fl.value).slice(0, -1); break;
-    case 'ctrl-u': if (!fl.bool) fl.value = ''; break;
-    case 'space': if (fl.bool) { fl.value = !fl.value; break; } // иначе — обычный символ
-    // fallthrough
-    case 'char': {
-      if (fl.bool) break;
-      const ch = e.k === 'space' ? ' ' : e.ch;
-      if (fl.digits && !/\d/.test(ch)) break;
-      fl.value += ch; break;
-    }
     case 'ctrl-c': return quit();
+    default:
+      if (fl.bool) { if (e.k === 'space') fl.value = !fl.value; }
+      else edit(fl, 'value', 'pos', e, fl.digits);
   }
   f.err = '';
   draw();
@@ -665,7 +718,7 @@ function pick(title, loader, opts = {}) {
     const prev = ui.mode;
     const p = ui.picker = { title, f2: opts.f2, multi: !!opts.multi, checked: opts.checked || new Set(), items: null, err: '', filter: '', sel: 0, off: 0, done: v => { ui.picker = null; ui.mode = prev; draw(); resolve(v); } };
     ui.mode = 'picker'; draw();
-    Promise.resolve(loader).then(items => { p.items = items; if (opts.current !== undefined) { const i = items.findIndex(x => x.value === opts.current || sameFile(x.value, opts.current)); if (i >= 0) p.sel = i; } draw(); }, err => { p.err = err.message; draw(); });
+    Promise.resolve(loader).then(items => { p.items = items; if (opts.current !== undefined) { const i = items.findIndex(x => x.value === opts.current || (typeof x.value === 'string' && typeof opts.current === 'string' && sameFile(x.value, opts.current))); if (i >= 0) p.sel = i; } draw(); }, err => { p.err = err.message; draw(); });
   });
 }
 function filtered(p) {
@@ -675,7 +728,9 @@ function filtered(p) {
 function renderPicker() {
   const p = ui.picker, rows = [];
   rows.push(new Row(0).add(' ' + p.title + ' ', C.title).fill(C.title));
-  rows.push(new Row(1).add('  Фильтр: ', C.dim).add(p.filter + '▌', C.bold).fill());
+  const fr = new Row(1).add('  Фильтр: ', C.dim);
+  addInput(fr, p, 'filter', 'fpos', 'foff', Math.max(10, Math.min(60, W - 16)), C.input, true);
+  rows.push(fr.fill());
   const listH = Math.max(3, H - 4);
   if (p.err) rows.push(new Row(2).add('  ' + p.err, C.red).fill());
   else if (!p.items) rows.push(new Row(2).add('  Загрузка…', C.yellow).fill());
@@ -718,10 +773,10 @@ function pickerKey(e) {
     case 'pgup': p.sel = Math.max(0, p.sel - 10); break;
     case 'pgdn': p.sel = Math.min(items.length - 1, p.sel + 10); break;
     case 'enter': if (p.multi) return finishMulti(p); if (items[p.sel]) return p.done(items[p.sel].value); break;
-    case 'bs': p.filter = p.filter.slice(0, -1); p.sel = 0; break;
-    case 'space': if (p.multi) { if (items[p.sel]) toggleChecked(p, items[p.sel]); return; } p.filter += ' '; p.sel = 0; break;
-    case 'char': p.filter += e.ch; p.sel = 0; break;
     case 'ctrl-c': return p.done(null);
+    case 'space': if (p.multi) { if (items[p.sel]) toggleChecked(p, items[p.sel]); return; } // иначе — пробел в фильтре
+    // fallthrough
+    default: { const was = p.filter; if (edit(p, 'filter', 'fpos', e) && p.filter !== was) p.sel = 0; }
   }
   draw();
 }
@@ -749,6 +804,96 @@ async function discover(f) {
   f.focus = 0; draw();
 }
 
+// ───────────────────────── формат логов по шаблону logback ─────────────────────────
+// Сервисы в кластере пишут логи в JSON. Чтобы их было удобно читать, строки приводятся к шаблону logback:
+// берём <pattern> из ~/.m2/logback-local.xml, а если файла нет — встроенный (такой же, как в нём).
+const DEFAULT_LOG_PATTERN = '%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] [traceId = %X{traceId}] [spanId = %X{spanId}] %logger{36} - %message%n%rEx';
+function loadLogPattern() {
+  try {
+    const xml = fs.readFileSync(path.join(require('os').homedir(), '.m2', 'logback-local.xml'), 'utf8');
+    const m = /<pattern>([\s\S]*?)<\/pattern>/.exec(xml);
+    if (m && m[1].trim()) return m[1].trim().replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+  } catch (_) {}
+  return DEFAULT_LOG_PATTERN;
+}
+function compileLogPattern(pat) {
+  const toks = [], re = /%(-?)(\d*)(?:\.(\d+))?([a-zA-Z]+)(?:\{([^}]*)\})?|%%|[^%]+|%/g;
+  let m;
+  while ((m = re.exec(pat))) {
+    if (m[4]) toks.push({ left: m[1] === '-', min: m[2] ? +m[2] : 0, max: m[3] ? +m[3] : 0, word: m[4], opt: m[5] });
+    else toks.push({ lit: m[0] === '%%' ? '%' : m[0] });
+  }
+  return toks;
+}
+const LOG_TOKENS = compileLogPattern(loadLogPattern());
+
+const pick1 = (o, keys) => { for (const k of keys) { const v = k.includes('.') && !(k in o) ? k.split('.').reduce((a, x) => (a == null ? a : a[x]), o) : o[k]; if (v !== undefined && v !== null && v !== '') return v; } return undefined; };
+function fmtDate(v, f) {
+  if (v === undefined) return '';
+  let d = typeof v === 'number' ? new Date(v < 1e11 ? v * 1000 : v) : new Date(v);
+  if (isNaN(d)) return String(v);
+  const map = { yyyy: d.getFullYear(), MM: pad2(d.getMonth() + 1), dd: pad2(d.getDate()), HH: pad2(d.getHours()), mm: pad2(d.getMinutes()), ss: pad2(d.getSeconds()), SSS: String(d.getMilliseconds()).padStart(3, '0') };
+  return f.replace(/yyyy|MM|dd|HH|mm|ss|SSS/g, t => map[t]);
+}
+// logback сокращает пакеты до одной буквы слева направо, пока имя не уложится в заданную длину
+function abbrevLogger(name, n) {
+  if (!n || name.length <= n) return name;
+  const parts = name.split('.');
+  for (let i = 0; i < parts.length - 1 && parts.join('.').length > n; i++) parts[i] = parts[i][0];
+  return parts.join('.');
+}
+function parseLogJson(text) {
+  const m = /^(\[pod\/[^\]]*\]\s)?(\{[\s\S]*\})\s*$/.exec(text);
+  if (!m) return null;
+  let o;
+  try { o = JSON.parse(m[2]); } catch (_) { return null; }
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
+  const message = pick1(o, ['message', 'msg', '@m', 'log', 'event']);
+  const level = pick1(o, ['level', 'log.level', 'severity', 'levelName', '@l', 'lvl']);
+  if (message === undefined && level === undefined) return null; // не похоже на запись лога
+  const mdc = (o.mdc && typeof o.mdc === 'object') ? o.mdc : (o.MDC && typeof o.MDC === 'object') ? o.MDC : {};
+  const trace = pick1(o, ['traceId', 'trace_id', 'trace.id', 'X-B3-TraceId', 'x-b3-traceid']) ?? pick1(mdc, ['traceId', 'trace_id', 'X-B3-TraceId']);
+  const span = pick1(o, ['spanId', 'span_id', 'span.id', 'X-B3-SpanId', 'x-b3-spanid']) ?? pick1(mdc, ['spanId', 'span_id', 'X-B3-SpanId']);
+  const stack = pick1(o, ['stack_trace', 'stackTrace', 'exception', 'throwable', 'error.stack_trace', 'exc_info']);
+  return {
+    prefix: m[1] || '', time: pick1(o, ['@timestamp', 'timestamp', 'time', 'ts', '@t', 'date']),
+    level: level === undefined ? '' : String(level).toUpperCase(),
+    thread: pick1(o, ['thread_name', 'thread', 'process.thread.name', 'threadName']),
+    logger: pick1(o, ['logger_name', 'logger', 'log.logger', 'loggerName', 'class']),
+    message: message === undefined ? '' : (typeof message === 'string' ? message : JSON.stringify(message)),
+    mdc: { ...mdc, ...o, ...(trace !== undefined ? { traceId: trace } : {}), ...(span !== undefined ? { spanId: span } : {}) },
+    stack: stack === undefined ? '' : (typeof stack === 'string' ? stack : JSON.stringify(stack)),
+  };
+}
+function formatLog(text) {
+  const f = parseLogJson(text);
+  if (!f) return null;
+  let line = '';
+  for (const t of LOG_TOKENS) {
+    if (t.lit !== undefined) { line += t.lit; continue; }
+    let v = '';
+    switch (t.word) {
+      case 'd': case 'date': v = fmtDate(f.time, t.opt || 'yyyy-MM-dd HH:mm:ss.SSS'); break;
+      case 'level': case 'p': v = f.level; break;
+      case 'thread': case 't': v = f.thread ?? ''; break;
+      case 'logger': case 'c': case 'lo': v = abbrevLogger(String(f.logger ?? ''), t.opt ? +t.opt : 0); break;
+      case 'message': case 'msg': case 'm': v = f.message; break;
+      case 'X': case 'mdc': { const x = f.mdc[t.opt]; v = x === undefined || x === null ? '' : (typeof x === 'object' ? JSON.stringify(x) : String(x)); break; }
+      default: v = ''; // %n, %rEx/%ex и неизвестные слова выводятся отдельно или пропускаются
+    }
+    v = String(v);
+    if (t.max && v.length > t.max) v = v.slice(0, t.max);
+    if (t.min && v.length < t.min) v = t.left ? v.padEnd(t.min) : v.padStart(t.min);
+    line += v;
+  }
+  const out = [], lvl = f.level;
+  // многострочное сообщение: продолжение показываем отдельными строками того же уровня
+  const msgLines = (f.prefix + line).split(/\r?\n/);
+  msgLines.forEach(l => out.push({ text: cleanLine(l), lvl }));
+  if (f.stack) f.stack.split(/\r?\n/).forEach(l => { if (l.trim()) out.push({ text: cleanLine(l), lvl, dim: !/^\s*(Caused by|Exception|[\w.$]+(Exception|Error))/.test(l) }); });
+  return out;
+}
+
 // ───────────────────────── логи пода (как в Lens) ─────────────────────────
 const LOG_BUF = 5000;
 const cleanLine = t => t.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '').replace(/\t/g, '  ').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
@@ -756,7 +901,8 @@ const cleanLine = t => t.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '').replace(/\t/
 function openLogs() {
   const s = curSvc(); if (!s) return;
   ui.lv = { svc: s, src: 'pod', pod: [], scroll: 0, filter: '', searching: false, wrap: true, proc: null, timer: null, closed: false,
-    gen: 0, retries: 0, endedAt: 0, msg: 'подключение…', selector: '', carryO: '', carryE: '' };
+    gen: 0, retries: 0, endedAt: 0, msg: 'подключение…', selector: '', carryO: '', carryE: '',
+    mode: null, podName: '', podInfo: null, podCount: 0, fmt: true, fmtGen: 0 }; // mode: null (ещё не выбрано) | 'one' | 'all'
   ui.mode = 'logs';
   podLogsStart(ui.lv); draw();
 }
@@ -788,24 +934,86 @@ function podFeed(lv, d, isErr) {
   if (!isErr) lv.retries = 0;
   draw();
 }
+const ALL_PODS = { all: true };
+const pad2 = n => String(n).padStart(2, '0');
+function fmtStart(iso) {
+  const d = new Date(iso);
+  if (!iso || isNaN(d)) return '';
+  const abs = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  const sec = Math.max(0, Math.round((Date.now() - d) / 1000));
+  const ago = sec < 60 ? `${sec} с` : sec < 3600 ? `${Math.floor(sec / 60)} мин` : sec < 172800 ? `${Math.floor(sec / 3600)} ч` : `${Math.floor(sec / 86400)} дн`;
+  return `${abs} (${ago} назад)`;
+}
+// без явного -c kubectl может отказаться читать лог пода с несколькими контейнерами,
+// поэтому берём контейнер по умолчанию, а служебные sidecar-ы (istio и т.п.) пропускаем
+function mainContainer(pod) {
+  const cs = (pod.spec.containers || []).map(c => c.name);
+  const def = (pod.metadata.annotations || {})['kubectl.kubernetes.io/default-container'];
+  if (def && cs.includes(def)) return def;
+  return cs.find(n => !/^(istio-proxy|linkerd-proxy|envoy.*|vault-agent.*)$/.test(n)) || cs[0] || '';
+}
+async function listPods(kc, s) {
+  const svc = await kube(kc, ['-n', s.namespace, 'get', 'svc', s.service, '-o', 'json']);
+  const sel = Object.entries(svc.spec.selector || {}).map(([k, v]) => `${k}=${v}`).join(',');
+  if (!sel) throw new Error('у сервиса нет selector, логи подов недоступны');
+  const d = await kube(kc, ['-n', s.namespace, 'get', 'pods', '-l', sel, '-o', 'json']);
+  const pods = d.items.map(i => ({
+    name: i.metadata.name, start: i.status.startTime || '', phase: i.status.phase || '',
+    container: mainContainer(i), containers: (i.spec.containers || []).length,
+  })).sort((x, y) => (y.start || '').localeCompare(x.start || ''));
+  return { sel, pods };
+}
+function podItems(pods) {
+  const w = Math.max(...pods.map(p => p.name.length));
+  return [
+    { label: `Все поды (${pods.length}), с префиксом перед каждой строкой`, value: ALL_PODS },
+    ...pods.map(p => ({ label: `${p.name.padEnd(w)}  ${p.phase.padEnd(9)} ${p.start ? 'запущен ' + fmtStart(p.start) : 'время старта неизвестно'}`, value: p })),
+  ];
+}
+function useChoice(lv, choice) {
+  if (choice === ALL_PODS) { lv.mode = 'all'; lv.podName = ''; lv.podInfo = null; }
+  else { lv.mode = 'one'; lv.podName = choice.name; lv.podInfo = choice; }
+}
 async function podLogsStart(lv) {
   const s = lv.svc, kc = kubeconfigOf(s), my = ++lv.gen;
-  lv.msg = 'получаю selector сервиса…'; draw();
-  let sel;
-  try {
-    const svc = await kube(kc, ['-n', s.namespace, 'get', 'svc', s.service, '-o', 'json']);
-    sel = Object.entries(svc.spec.selector || {}).map(([k, v]) => `${k}=${v}`).join(',');
-    if (!sel) throw new Error('у сервиса нет selector, логи подов недоступны');
-  } catch (e) {
-    if (lv.closed || my !== lv.gen) return;
+  lv.msg = 'ищу поды…'; draw();
+  const stale = () => lv.closed || my !== lv.gen;
+  let sel, pods;
+  try { ({ sel, pods } = await listPods(kc, s)); }
+  catch (e) {
+    if (stale()) return;
     lv.msg = 'ошибка: ' + e.message + ' — повтор…';
     lv.pod.push({ text: '⚠ ' + e.message, sys: true });
     podRetry(lv); return draw();
   }
-  if (lv.closed || my !== lv.gen) return;
-  lv.selector = sel;
+  if (stale()) return;
+  lv.selector = sel; lv.podCount = pods.length;
+  if (!pods.length) { lv.msg = 'у сервиса нет подов — повтор…'; podRetry(lv); return draw(); }
+
+  if (lv.mode === 'one') {
+    const cur = pods.find(x => x.name === lv.podName);
+    if (cur) lv.podInfo = cur;
+    else if (pods.length === 1) { useChoice(lv, pods[0]); lv.pod.push({ text: `↻ под заменён: ${pods[0].name}`, sys: true }); lv.endedAt = 0; }
+    else { lv.podInfo = null; lv.msg = `под «${lv.podName}» исчез — нажмите P и выберите новый`; return draw(); }
+  } else if (lv.mode === null) {
+    if (pods.length === 1) useChoice(lv, pods[0]);
+    else {
+      lv.msg = 'выберите под'; draw();
+      const choice = await pick(`Под сервиса ${s.service} (${pods.length})`, podItems(pods));
+      if (stale()) return;
+      if (!choice) return closeLogs();
+      useChoice(lv, choice);
+    }
+  }
+  streamLogs(lv, my, kc, sel, pods);
+}
+function streamLogs(lv, my, kc, sel, pods) {
+  const s = lv.svc;
+  const args = ['-n', s.namespace, 'logs'];
+  if (lv.mode === 'all') args.push('-l', sel, '--prefix', '--max-log-requests=20');
+  else { const pd = pods.find(x => x.name === lv.podName); args.push(lv.podName); if (pd && pd.container) args.push('-c', pd.container); }
+  args.push('-f');
   // при переподключении берём только то, что появилось с момента обрыва (чтобы не дублировать историю)
-  const args = ['-n', s.namespace, 'logs', '-l', sel, '-f', '--prefix', '--max-log-requests=20'];
   if (lv.endedAt) args.push(`--since=${Math.ceil((Date.now() - lv.endedAt) / 1000) + 1}s`, '--tail=-1'); else args.push('--tail=300');
   if (kc) args.push('--kubeconfig=' + kc);
   let p;
@@ -824,13 +1032,40 @@ async function podLogsStart(lv) {
     podRetry(lv); draw();
   });
 }
+// P: сменить под во время просмотра
+async function choosePod(lv) {
+  let res;
+  try { res = await listPods(kubeconfigOf(lv.svc), lv.svc); }
+  catch (e) { lv.msg = 'ошибка: ' + e.message; return draw(); }
+  if (lv.closed) return;
+  lv.podCount = res.pods.length;
+  if (res.pods.length < 2) { lv.msg = res.pods.length ? 'у сервиса один под, выбирать не из чего' : 'у сервиса нет подов'; return draw(); }
+  const choice = await pick(`Под сервиса ${lv.svc.service} (${res.pods.length})`, podItems(res.pods), { current: lv.mode === 'all' ? ALL_PODS : res.pods.find(x => x.name === lv.podName) });
+  if (lv.closed) return;
+  if (choice) { useChoice(lv, choice); podLogsRestart(lv); }
+  draw();
+}
 
+function viewOf(lv, e) {
+  if (e.vg !== lv.fmtGen) {
+    e.vg = lv.fmtGen;
+    e.view = (lv.fmt && !e.err && !e.sys && formatLog(e.text)) || [e];
+  }
+  return e.view;
+}
 function lvSource(lv) {
-  const src = lv.src === 'pod' ? lv.pod : rt(lv.svc).log.map(l => ({ text: l.t + ' ' + l.text, sys: l.sys }));
+  const src = lv.src === 'pod' ? lv.pod.flatMap(e => viewOf(lv, e)) : rt(lv.svc).log.map(l => ({ text: l.t + ' ' + l.text, sys: l.sys }));
   const q = lv.filter.toLowerCase();
   return q ? src.filter(l => l.text.toLowerCase().includes(q)) : src;
 }
 function lvStyle(l) {
+  if (l.dim) return C.gray;
+  if (l.lvl) {
+    if (/^(ERROR|FATAL|SEVERE|CRITICAL|PANIC)/.test(l.lvl)) return C.red;
+    if (/^WARN/.test(l.lvl)) return C.yellow;
+    if (/^(DEBUG|TRACE)/.test(l.lvl)) return C.gray;
+    return '';
+  }
   if (l.err) return C.red;
   if (l.sys) return C.sys;
   if (/\b(ERROR|FATAL|PANIC|CRITICAL)\b|"level"\s*:\s*"(error|fatal|panic)"|\blevel=(error|fatal)\b/.test(l.text)) return C.red;
@@ -840,7 +1075,13 @@ function lvStyle(l) {
 function renderLogs() {
   const lv = ui.lv, rows = [], s = lv.svc;
   const n = Math.max(3, H - 4), width = Math.max(10, W - 2);
-  rows.push(new Row(0).add(` Логи: ${s.name} `, C.title).add(` ${s.namespace}/${s.service} `, C.title).fill(C.title));
+  const head = new Row(0).add(` Логи: ${s.name} `, C.title);
+  if (lv.mode === 'all') head.add(` ⎈ все поды (${lv.podCount}) `, C.title);
+  else if (lv.podName) {
+    head.add(` ⎈ ${lv.podName} `, C.title);
+    if (lv.podInfo && lv.podInfo.start) head.add(` запущен ${fmtStart(lv.podInfo.start)} `, C.title);
+  } else head.add(` ${s.namespace}/${s.service} `, C.title);
+  rows.push(head.fill(C.title));
 
   const lines = lvSource(lv);
   let total = 0;
@@ -852,7 +1093,12 @@ function renderLogs() {
   srcBtn('pod', '1 Под'); srcBtn('pf', '2 Port-forward');
   tb.add(lv.scroll > 0 ? ' ⏸ пауза ' : ' ● live ', lv.scroll > 0 ? C.yellow : C.green, () => { lv.scroll = 0; draw(); });
   tb.add(` ${lines.length} строк `, C.dim);
-  if (lv.filter || lv.searching) tb.add(' ⌕ ' + lv.filter + (lv.searching ? '▌' : '') + ' ', lv.searching ? C.inputF : C.input);
+  if (lv.filter || lv.searching) {
+    const fs_ = lv.searching ? C.inputF : C.input;
+    tb.add(' ⌕ ', fs_, () => { lv.searching = true; draw(); });
+    addInput(tb, lv, 'filter', 'fpos', 'foff', Math.max(10, Math.min(40, W - tb.x - 24)), fs_, lv.searching, () => { lv.searching = true; draw(); });
+    tb.add(' ', fs_);
+  }
   if (lv.src === 'pod') tb.add(' ' + lv.msg, lv.proc ? C.gray : C.yellow);
   tb.fill(); rows.push(tb);
 
@@ -881,7 +1127,9 @@ function renderLogs() {
     { key: '↑↓', label: 'Прокрутка', fn: () => {} },
     { key: 'End', label: 'К концу', fn: () => { lv.scroll = 0; draw(); } },
     { key: '/', label: 'Фильтр', fn: () => { lv.searching = true; draw(); } },
+    { key: 'F', label: lv.fmt ? 'Формат: logback' : 'Формат: как есть', fn: () => { lv.fmt = !lv.fmt; lv.fmtGen++; lv.scroll = 0; draw(); } },
     { key: 'W', label: lv.wrap ? 'Не переносить' : 'Переносить', fn: () => { lv.wrap = !lv.wrap; draw(); } },
+    { key: 'P', label: 'Сменить под', fn: () => choosePod(lv) },
     { key: 'R', label: 'Перечитать', fn: () => { podLogsRestart(lv); draw(); } },
     { key: 'C', label: 'Очистить', fn: () => { lv.pod = []; lv.scroll = 0; draw(); } },
     { key: 'Tab', label: 'Источник', fn: () => { lv.src = lv.src === 'pod' ? 'pf' : 'pod'; lv.scroll = 0; draw(); } },
@@ -896,17 +1144,18 @@ function logsKey(e) {
   const lv = ui.lv, n = Math.max(3, H - 4);
   if (lv.searching) {
     switch (e.k) {
-      case 'esc': lv.filter = ''; lv.searching = false; break;
+      case 'esc': lv.filter = ''; lv.fpos = 0; lv.searching = false; break;
       case 'enter': lv.searching = false; break;
-      case 'bs': if (lv.filter) lv.filter = lv.filter.slice(0, -1); else lv.searching = false; break;
-      case 'ctrl-u': lv.filter = ''; break;
-      case 'space': lv.filter += ' '; break;
-      case 'char': lv.filter += e.ch; break;
       case 'ctrl-c': return closeLogs();
+      case 'bs': if (!lv.filter) { lv.searching = false; break; } // иначе — обычное стирание
+      // fallthrough
+      default: edit(lv, 'filter', 'fpos', e);
     }
     lv.scroll = 0;
     return draw();
   }
+  // вставка вне режима фильтра сразу становится фильтром (например, UUID)
+  if (e.k === 'paste') { lv.filter = e.text; lv.fpos = undefined; lv.scroll = 0; return draw(); }
   const ch = e.k === 'char' ? (LAT[e.ch.toLowerCase()] || e.ch.toLowerCase()) : '';
   switch (e.k) {
     case 'esc': if (lv.filter) { lv.filter = ''; lv.scroll = 0; break; } return closeLogs();
@@ -926,7 +1175,9 @@ function logsKey(e) {
   if (e.k === 'char' && e.ch === '2') { lv.src = 'pf'; lv.scroll = 0; }
   if (ch === 'q') return closeLogs();
   if (ch === 'w') lv.wrap = !lv.wrap;
+  if (ch === 'f') { lv.fmt = !lv.fmt; lv.fmtGen++; lv.scroll = 0; }
   if (ch === 'r') podLogsRestart(lv);
+  if (ch === 'p') return choosePod(lv);
   if (ch === 'c') { lv.pod = []; lv.scroll = 0; }
   draw();
 }
@@ -935,12 +1186,32 @@ function logsKey(e) {
 const KEYS = {
   '\x1b[A': 'up', '\x1b[B': 'down', '\x1b[C': 'right', '\x1b[D': 'left', '\x1b[H': 'home', '\x1b[F': 'end',
   '\x1b[1~': 'home', '\x1b[4~': 'end', '\x1b[3~': 'del', '\x1b[5~': 'pgup', '\x1b[6~': 'pgdn', '\x1b[Z': 'stab',
-  '\x1bOQ': 'f2', '\x1b[12~': 'f2', '\x1bOA': 'up', '\x1bOB': 'down',
+  '\x1bOQ': 'f2', '\x1b[12~': 'f2', '\x1bOA': 'up', '\x1bOB': 'down', '\x1bOH': 'home', '\x1bOF': 'end', '\x1b[7~': 'home', '\x1b[8~': 'end',
+  '\x1b[1;5D': 'wleft', '\x1b[1;5C': 'wright', '\x1b[1;3D': 'wleft', '\x1b[1;3C': 'wright', '\x1b[2;2~': 'ctrl-v',
 };
 const TOKEN = /\x1b\[<(\d+);(\d+);(\d+)([Mm])|\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1bO[A-Z]|\x1b|[\s\S]/gu;
 
+const decoder = new (require('string_decoder').StringDecoder)('utf8');
+let pasteBuf = null; // накопление текста между \x1b[200~ и \x1b[201~ (bracketed paste)
 function onData(buf) {
-  for (const m of buf.toString('utf8').matchAll(TOKEN)) {
+  let str = decoder.write(buf);
+  while (str.length) {
+    if (pasteBuf !== null) {
+      const i = str.indexOf('\x1b[201~');
+      if (i < 0) { pasteBuf += str; return; }
+      const text = cleanPaste(pasteBuf + str.slice(0, i));
+      pasteBuf = null; str = str.slice(i + 6);
+      if (text) onKey({ k: 'paste', text });
+      continue;
+    }
+    const i = str.indexOf('\x1b[200~');
+    if (i < 0) { onTokens(str); return; }
+    onTokens(str.slice(0, i));
+    pasteBuf = ''; str = str.slice(i + 6);
+  }
+}
+function onTokens(str) {
+  for (const m of str.matchAll(TOKEN)) {
     const t = m[0];
     if (m[1] !== undefined) { onMouse(Number(m[1]), Number(m[2]) - 1, Number(m[3]) - 1, m[4] === 'M'); continue; }
     let e;
@@ -951,6 +1222,10 @@ function onData(buf) {
     else if (t === '\x7f' || t === '\b') e = { k: 'bs' };
     else if (t === '\x03') e = { k: 'ctrl-c' };
     else if (t === '\x15') e = { k: 'ctrl-u' };
+    else if (t === '\x17') e = { k: 'ctrl-w' };
+    else if (t === '\x16') e = { k: 'ctrl-v' };
+    else if (t === '\x01') e = { k: 'home' };
+    else if (t === '\x05') e = { k: 'end' };
     else if (t === '\x06') e = { k: 'ctrl-f' };
     else if (t === ' ') e = { k: 'space' };
     else if (t >= ' ' && t[0] !== '\x1b') e = { k: 'char', ch: t };
@@ -960,10 +1235,10 @@ function onData(buf) {
 }
 function onMouse(b, x, y, press) {
   if (!press) return;
-  if (b === 64 || b === 65) { // колесо
-    const d = b === 64 ? 'up' : 'down';
+  if ((b & 64) && (b & 3) < 2) { // колесо (с любыми модификаторами Shift/Alt/Ctrl)
+    const up = (b & 1) === 0, d = up ? 'up' : 'down';
     if (ui.mode === 'list') onKey({ k: d }); else if (ui.mode === 'picker') pickerKey({ k: d });
-    else if (ui.mode === 'logs' && ui.lv) { ui.lv.scroll = Math.max(0, ui.lv.scroll + (b === 64 ? 3 : -3)); draw(); }
+    else if (ui.mode === 'logs' && ui.lv) { ui.lv.scroll = Math.max(0, ui.lv.scroll + (up ? 3 : -3)); draw(); }
     return;
   }
   if (b !== 0) return;
@@ -973,6 +1248,7 @@ function onMouse(b, x, y, press) {
   }
 }
 function onKey(e) {
+  if (e.k === 'ctrl-v') { readClipboard(t => { const text = cleanPaste(t); if (text) onKey({ k: 'paste', text }); }); return; }
   if (ui.mode === 'form') return formKey(e);
   if (ui.mode === 'picker') return pickerKey(e);
   if (ui.mode === 'logs') return logsKey(e);
@@ -990,19 +1266,20 @@ function onKey(e) {
   const nextTab = () => setTab(TABS[(TABS.indexOf(ui.tab) + 1) % TABS.length]);
   if (ui.searching) {
     switch (e.k) {
-      case 'esc': ui.query = ''; ui.searching = false; ui[sk] = 0; break;
+      case 'esc': ui.query = ''; ui.qpos = 0; ui.searching = false; ui[sk] = 0; break;
       case 'enter': ui.searching = false; break;
-      case 'bs': if (ui.query) { ui.query = ui.query.slice(0, -1); } else ui.searching = false; ui[sk] = 0; break;
-      case 'ctrl-u': ui.query = ''; ui[sk] = 0; break;
-      case 'space': ui.query += ' '; ui[sk] = 0; break;
-      case 'char': ui.query += e.ch; ui[sk] = 0; break;
       case 'tab': nextTab(); break;
       case 'up': ui[sk] = Math.max(0, ui[sk] - 1); break;
       case 'down': ui[sk] = Math.min(n - 1, ui[sk] + 1); break;
       case 'ctrl-c': return quit();
+      case 'bs': if (!ui.query) { ui.searching = false; break; } // иначе — обычное стирание
+      // fallthrough
+      default: { const was = ui.query; if (edit(ui, 'query', 'qpos', e) && ui.query !== was) ui[sk] = 0; }
     }
     return draw();
   }
+  // вставка вне режима поиска сразу превращается в запрос
+  if (e.k === 'paste') { ui.query = e.text; ui.qpos = undefined; ui.searching = false; ui[sk] = 0; return draw(); }
   const ch = e.k === 'char' ? (LAT[e.ch.toLowerCase()] || e.ch.toLowerCase()) : '';
   if (e.k === 'ctrl-c' || ch === 'q') return quit();
   switch (e.k) {
@@ -1109,8 +1386,12 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   ↑ ↓ / колесо / клик   выбрать             Enter / Пробел / двойной клик   старт / стоп
   A  добавить           E  изменить         D / Del  удалить
   S  запустить все видимые                  X  остановить все видимые
-  L  логи пода на весь экран (как в Lens): прокрутка, фильтр, перенос, переподключение
+  L  логи пода на весь экран (как в Lens): один под — сразу, несколько — выбор
+     со временем старта; в просмотре P — сменить под, / — фильтр, W — перенос,
+     F — формат: JSON-логи приводятся к шаблону logback (~/.m2/logback-local.xml)
   /  или Ctrl+F  поиск (имя, namespace, service, порт, статус); Esc — сбросить
+  Во всех полях ввода: ←→ Home End Del — курсор, Ctrl+←/→ — по словам, Ctrl+W — слово назад,
+  Ctrl+U — очистить, Ctrl+V / Shift+Insert — вставить из буфера обмена
   1 2 3 / Tab    вкладки: Все, Запущенные, Шаблоны
   G              сохранить запущенные сервисы как шаблон
   K              выбор kubeconfig из папки (F2 в списке — сменить папку)
@@ -1135,20 +1416,20 @@ if (!process.stdin.isTTY) { console.error('Нужен интерактивный
 
 // bftport --keys: диагностика ввода — показывает сырые байты нажатий и кликов мыши
 if (process.argv.includes('--keys')) {
-  process.stdout.write('\x1b[?1000h\x1b[?1006h');
+  process.stdout.write('\x1b[?1000h\x1b[?1006h\x1b[?2004h');
   process.stdin.setRawMode(true);
   process.stdin.resume();
   enableConsoleMouse();
   console.log(`terminal: ${process.env.WT_SESSION ? 'Windows Terminal' : process.env.TERM_PROGRAM || 'не Windows Terminal (conhost/другой)'}`);
   console.log('Кликайте мышью и жмите клавиши. Ничего не появляется при клике — мышь не доходит. Ctrl+C — выход.\r');
   process.stdin.on('data', d => {
-    if (d.includes(3)) { process.stdout.write('\x1b[?1000l\x1b[?1006l'); process.exit(0); }
+    if (d.includes(3)) { process.stdout.write('\x1b[?2004l\x1b[?1000l\x1b[?1006l'); process.exit(0); }
     console.log(JSON.stringify(d.toString()) + '\r');
   });
   return;
 }
 
-process.stdout.write('\x1b[?1049h\x1b[?7l\x1b[?1000h\x1b[?1006h');
+process.stdout.write('\x1b[?1049h\x1b[?7l\x1b[?1000h\x1b[?1006h\x1b[?2004h');
 process.stdin.setRawMode(true);
 process.stdin.resume();
 enableConsoleMouse();
@@ -1157,7 +1438,7 @@ process.stdout.on('resize', draw);
 process.on('exit', killAll);
 process.on('uncaughtException', e => {
   killAll();
-  process.stdout.write('\x1b[?1000l\x1b[?1006l\x1b[?7h\x1b[?25h\x1b[?1049l');
+  process.stdout.write('\x1b[?2004l\x1b[?1000l\x1b[?1006l\x1b[?7h\x1b[?25h\x1b[?1049l');
   console.error(e);
   process.exit(1);
 });
