@@ -415,7 +415,7 @@ function renderList() {
       .add(trunc(`${s.localPort}:${s.remotePort}`, 14) + ' ', bg, click);
     const left = W - row.x;
     const detail = r.status === 'running' || r.status === 'stopped' && !r.info ? st[2] + (s.autostart ? ' · авто' : '') : `${st[2]} · ${r.info}`;
-    row.add(trunc(detail, left), (r.status === 'error' ? C.red : r.status === 'running' ? C.green : C.gray) + bg, click);
+    row.add(trunc(detail, left), (r.status === 'stopped' ? C.gray : st[1]) + bg, click);
     row.fill(bg); rows.push(row);
   }
 
