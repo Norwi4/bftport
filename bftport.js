@@ -189,6 +189,7 @@ const ui = {
   lv: null,            // состояние просмотра логов
   psel: 0, poff: 0, pkey: '', // вкладка «Кластер»: выбранный под
   pods: { list: [], at: 0, err: '', loading: false, ns: '', gen: 0 },
+  favSel: { key: '', at: 0, map: new Map(), loading: null }, // selector'ы избранных сервисов: ns/service -> {k: v}
   gsel: 0, goff: 0,    // выбранный шаблон на вкладке «Шаблоны»
   query: '', searching: false,
   lastClick: { id: null, t: 0 },
@@ -325,7 +326,8 @@ function matchKind(s) {
   return terms.every(t => meta.includes(t)) ? 'meta' : null;
 }
 function visible() {
-  return db.services.filter(s => (ui.tab === 'all' || isActive(s)) && matchKind(s));
+  // «Избранное» — только сохранённые сервисы; остальные вкладки показывают всё запущенное, включая пробросы к подам
+  return (ui.tab === 'all' ? db.services : allSvcs().filter(isActive)).filter(matchKind);
 }
 const curSvc = () => visible()[ui.sel];
 
@@ -455,8 +457,8 @@ function renderList() {
   const rows = [];
   const isG = ui.tab === 'groups';
   const svcs = isG ? [] : visible();
-  const running = db.services.filter(s => rt(s).status === 'running').length;
-  const activeN = db.services.filter(isActive).length;
+  const running = allSvcs().filter(s => rt(s).status === 'running').length;
+  const activeN = allSvcs().filter(isActive).length;
   const t = new Row(0);
   t.add(` ⇄ Port Forwards v${VERSION} `, C.title).add(` ${db.services.length} сервисов · ${running} работает `, C.title);
   const kc = db.kubeconfig ? '⎈ ' + path.basename(db.kubeconfig) + ' ▾' : 'kubeconfig не выбран (K)';
@@ -510,8 +512,8 @@ function renderList() {
     const click = () => onRowClick(idx);
     row.add(idx === ui.sel ? '▌' : ' ', C.yellow + bg, click)
       .add(' ' + st[0] + ' ', st[1] + bg, click)
-      .add(trunc(s.name, nameW) + ' ', C.bold + bg, click)
-      .add(trunc(`${s.namespace}/${s.service}`, targetW) + ' ', C.dim + bg, click)
+      .add(trunc((s.kind === 'pod' ? '⎈ ' : '') + s.name, nameW) + ' ', C.bold + bg, click)
+      .add(trunc(`${s.namespace}/${s.kind === 'pod' ? 'pod/' : ''}${s.service}`, targetW) + ' ', C.dim + bg, click)
       .add(trunc(`${s.localPort}:${s.remotePort}`, 14) + ' ', bg, click);
     const left = W - row.x;
     const detail = r.status === 'running' || r.status === 'stopped' && !r.info ? st[2] + (s.autostart ? ' · авто' : '') : `${st[2]} · ${r.info}`;
@@ -534,7 +536,7 @@ function renderList() {
   const btns = [
     { key: 'Enter', label: cur && isActive(cur) ? 'Стоп' : 'Старт', fn: () => toggle() },
     { key: 'A', label: 'Добавить', fn: () => openServiceForm() },
-    { key: 'E', label: 'Изменить', fn: () => cur && openServiceForm(cur) },
+    { key: 'E', label: 'Изменить', fn: () => editService(cur) },
     { key: 'D', label: 'Удалить', fn: () => askDelete() },
     { key: 'S', label: 'Старт все', fn: () => { visible().forEach(start); } },
     { key: 'X', label: 'Стоп все', fn: () => { visible().forEach(stop); draw(); } },
@@ -578,8 +580,14 @@ function toggle() {
   if (isActive(s)) stop(s); else start(s);
   draw();
 }
+function editService(s) {
+  if (!s) return;
+  if (s.kind === 'pod') return flash('это проброс из вкладки «Кластер»: его можно только остановить (Enter)');
+  openServiceForm(s);
+}
 function askDelete() {
   const s = curSvc(); if (!s) return;
+  if (s.kind === 'pod') return flash('это проброс из вкладки «Кластер»: его можно только остановить (Enter)');
   ui.mode = 'confirm';
   ui.confirm = { msg: `Удалить «${s.name}»?`, yes: () => { stop(s); db.services.splice(db.services.indexOf(s), 1); db.groups.forEach(g => { g.services = g.services.filter(id => id !== s.id); }); saveDb(); closeConfirm(); } };
   draw();
@@ -1018,6 +1026,12 @@ function podsVisible() {
   if (!terms.length) return ui.pods.list;
   return ui.pods.list.filter(p => { const h = (p.ns + ' ' + p.name + ' ' + p.status).toLowerCase(); return terms.every(t => h.includes(t)); });
 }
+function parseLabels(v) {
+  const o = {};
+  if (!v || v === '<none>') return o;
+  for (const kv of v.split(',')) { const j = kv.indexOf('='); if (j > 0) o[kv.slice(0, j)] = kv.slice(j + 1); }
+  return o;
+}
 const noneToEmpty = v => (!v || v === '<none>') ? '' : v;
 // Колонки kubectl разделены минимум тремя пробелами, а внутри значений (например «3 (2h ago)») пробел одиночный.
 function parsePodTable(txt, withNs, ns) {
@@ -1030,7 +1044,7 @@ function parsePodTable(txt, withNs, ns) {
     out.push({
       ns: withNs ? c[0] : ns, name: c[i], ready: +m[1], total: +m[2], status: c[i + 2] || '',
       restartsText: c[i + 3] || '0', restarts: parseInt(c[i + 3], 10) || 0, age: c[i + 4] || '',
-      ip: noneToEmpty(c[i + 5]), node: noneToEmpty(c[i + 6]),
+      ip: noneToEmpty(c[i + 5]), node: noneToEmpty(c[i + 6]), labels: parseLabels(c[i + 9]),
     });
   }
   return out;
@@ -1060,10 +1074,47 @@ async function getDetail(p) {
   return e.d;
 }
 
+// Какие избранные сервисы относятся к поду: selector сервиса целиком входит в метки пода.
+async function ensureFavSel(force) {
+  const F = ui.favSel, kc = db.kubeconfig;
+  const wanted = [...new Set(db.services.map(x => x.namespace))].sort();
+  const key = kc + '|' + wanted.join(',');
+  if (!force && F.key === key && Date.now() - F.at < 60000) return;
+  if (F.loading) return F.loading;
+  F.loading = (async () => {
+    const map = new Map();
+    if (kc) await Promise.all(wanted.map(async ns => {
+      try {
+        const d = await kube(kc, ['-n', ns, 'get', 'svc', '-o', 'json']);
+        for (const i of d.items) { const sel = i.spec && i.spec.selector; if (sel && Object.keys(sel).length) map.set(ns + '/' + i.metadata.name, sel); }
+      } catch (_) { /* нет прав на этот namespace — просто не сопоставляем */ }
+    }));
+    F.map = map; F.key = key; F.at = Date.now();
+  })().finally(() => { F.loading = null; draw(); });
+  return F.loading;
+}
+function favsFor(p) {
+  return db.services.filter(f => {
+    if (f.namespace !== p.ns) return false;
+    const sel = ui.favSel.map.get(f.namespace + '/' + f.service);
+    return sel && Object.keys(sel).every(k => (p.labels || {})[k] === sel[k]);
+  });
+}
+// Что показывать в колонке «ПРОБРОС»: прямой проброс к поду или состояние избранного сервиса, к которому под относится.
+function podFwd(p) {
+  const e = eph.get(podKey(p));
+  if (e && (isActive(e) || rt(e).status === 'error')) { const r = rt(e); return { text: `⇄ :${e.localPort}${r.status === 'running' ? '' : ' ' + STATUS[r.status][2]}`, status: r.status }; }
+  const favs = favsFor(p);
+  const f = favs.find(isActive) || favs.find(x => rt(x).status === 'error');
+  if (f) { const r = rt(f); return { text: `★ ${f.name} :${f.localPort}${r.status === 'running' ? '' : ' ' + STATUS[r.status][2]}`, status: r.status }; }
+  if (favs.length) return { text: '★ ' + favs.map(x => x.name).join(', '), status: 'stopped' };
+  return null;
+}
+
 function resetPods(keepNs) {
   const P = ui.pods;
   ui.pods = { list: [], at: 0, err: '', loading: false, ns: keepNs ? P.ns : '', gen: P.gen + 1, dur: 0 };
-  podDet.clear();
+  podDet.clear(); ui.favSel.at = 0;
   ui.psel = 0; ui.poff = 0; ui.pkey = '';
   if (ui.tab === 'cluster') refreshPods();
 }
@@ -1077,10 +1128,11 @@ async function refreshPods() {
     // Таблица считается на стороне API-сервера (как в обычном «kubectl get pods»): в десятки раз меньше данных, чем JSON.
     // Контейнеры и порты выбранного пода подгружаются отдельно (loadDetail).
     const t0 = Date.now();
-    const txt = await kubeText(kc, ['get', 'pods', ...(P.ns ? ['-n', P.ns] : ['-A']), '-o', 'wide', '--no-headers'], 90000);
+    const txt = await kubeText(kc, ['get', 'pods', ...(P.ns ? ['-n', P.ns] : ['-A']), '-o', 'wide', '--show-labels', '--no-headers'], 90000);
     if (gen !== P.gen) return;
     P.list = parsePodTable(txt, !P.ns, P.ns).sort((a, b) => a.ns.localeCompare(b.ns) || a.name.localeCompare(b.name));
     P.err = ''; P.at = Date.now(); P.dur = P.at - t0;
+    ensureFavSel(); // не ждём: связь «под ↔ избранный сервис» подтянется следом
     const i = podsVisible().findIndex(x => podKey(x) === ui.pkey); // выбор «прилипает» к поду, а не к номеру строки
     if (i >= 0) ui.psel = i;
   } catch (e) { if (gen === P.gen) P.err = e.message; }
@@ -1116,14 +1168,13 @@ function renderCluster(rows) {
       row.fill(); rows.push(row); continue;
     }
     const idx = ui.poff + i, bg = idx === ui.psel ? C.sel : '', click = () => onPodClick(idx), col = podColor(p);
-    const fs_ = eph.get(podKey(p)), fr = fs_ && rt(fs_);
-    const fwd = fs_ && (isActive(fs_) || fr.status === 'error') ? `⇄ :${fs_.localPort}${fr.status === 'running' ? '' : ' ' + STATUS[fr.status][2]}` : '';
+    const fw = podFwd(p);
     row.add(idx === ui.psel ? '▌' : ' ', C.yellow + bg, click).add(' ● ', col + bg, click)
       .add(trunc(p.ns, nsW) + ' ', C.dim + bg, click).add(trunc(p.name, nameW) + ' ', C.bold + bg, click)
       .add(trunc(`${p.ready}/${p.total}`, 6) + ' ', (p.ready === p.total ? '' : C.yellow) + bg, click)
       .add(trunc(p.status, 16) + ' ', col + bg, click).add(trunc(String(p.restarts), 4) + ' ', (p.restarts ? C.yellow : C.gray) + bg, click)
       .add(trunc(p.age, 6) + ' ', C.gray + bg, click)
-      .add(trunc(fwd, Math.max(0, W - row.x)), (fr && fr.status === 'error' ? C.red : fr && fr.status === 'running' ? C.green : C.yellow) + bg, click);
+      .add(trunc(fw ? fw.text : '', Math.max(0, W - row.x)), (!fw || fw.status === 'stopped' ? C.gray : fw.status === 'error' ? C.red : fw.status === 'running' ? C.green : C.yellow) + bg, click);
     row.fill(bg); rows.push(row);
   }
   const nsLabel = P.ns ? 'namespace: ' + P.ns : 'все namespace';
@@ -1134,6 +1185,7 @@ function renderCluster(rows) {
   if (cur) {
     const e = podDet.get(podKey(cur)), d = e && e.d;
     det.push(`узел: ${cur.node || '—'}   IP: ${cur.ip || '—'}   возраст: ${cur.age}   перезапусков: ${cur.restartsText}${d && d.created ? '   создан: ' + fmtStart(d.created) : ''}`);
+    for (const f of favsFor(cur)) det.push(`★ избранное: ${f.name} (${f.namespace}/${f.service})  :${f.localPort} → ${f.remotePort}  · ${STATUS[rt(f).status][2]}`);
     if (d) {
       for (const c of d.containers) {
         const ports = d.ports.filter(x => x.container === c).map(x => `${x.port}/${x.protocol}${x.name ? ' (' + x.name + ')' : ''}`);
@@ -1142,9 +1194,11 @@ function renderCluster(rows) {
     } else det.push(e && e.err ? 'не удалось получить подробности: ' + e.err : 'загрузка подробностей…');
   }
   for (let i = 0; i < logH; i++) rows.push(new Row(4 + listH + i).add(det[i] ? ' ' + det[i] : '', i === 0 ? '' : C.dim).fill());
-  const fs2 = cur && eph.get(podKey(cur));
+  const fs2 = cur && eph.get(podKey(cur)), favs2 = cur ? favsFor(cur) : [];
+  const anyOn = (fs2 && isActive(fs2)) || favs2.some(isActive);
   const btns = [
-    { key: 'Enter', label: fs2 && isActive(fs2) ? 'Стоп проброса' : 'Проброс порта', fn: () => podAction() },
+    { key: 'Enter', label: anyOn ? 'Стоп проброса' : favs2.length ? 'Проброс (избранное)' : 'Проброс порта', fn: () => podAction() },
+    ...(favs2.length || anyOn ? [{ key: 'P', label: 'Напрямую к поду', fn: () => cur && directForward(cur) }] : []),
     { key: 'L', label: 'Логи', fn: () => cur && openPodLogs(cur) },
     { key: 'F', label: 'В избранное', fn: () => cur && podToFavorite(cur) },
     { key: 'N', label: 'Namespace', fn: () => chooseNamespace() },
@@ -1180,15 +1234,34 @@ function openNsForm() {
   };
   openForm(f);
 }
-function podAction() {
+const DIRECT = { direct: true };
+// Enter: если под относится к сервису из избранного — управляем этим сервисом (его порт, его состояние, он же виден в «Запущенных»);
+// иначе пробрасываем порт пода напрямую.
+async function podAction() {
   const p = podsVisible()[ui.psel]; if (!p) return;
-  const s = eph.get(podKey(p));
-  if (s && isActive(s)) { stop(s); return draw(); }
+  const e = eph.get(podKey(p));
+  if (e && isActive(e)) { stop(e); return draw(); }
+  await ensureFavSel();
+  const favs = favsFor(p), act = favs.filter(isActive);
+  if (act.length) { act.forEach(stop); return draw(); }
+  if (favs.length === 1) { start(favs[0]); return draw(); }
+  if (favs.length > 1) {
+    const items = [...favs.map(f => ({ label: `★ ${f.name.padEnd(28)} ${f.namespace}/${f.service}  :${f.localPort} → ${f.remotePort}`, value: f })), { label: 'Напрямую к поду (выбрать порт)', value: DIRECT }];
+    const c = await pick(`Через какой сервис пробросить (${p.name})`, items);
+    if (!c) return;
+    if (c === DIRECT) return openPodForward(p);
+    start(c); return draw();
+  }
+  openPodForward(p);
+}
+function directForward(p) {
+  const e = eph.get(podKey(p));
+  if (e && isActive(e)) { stop(e); return draw(); }
   openPodForward(p);
 }
 async function openPodForward(p) {
   const d = await getDetail(p), ports = d ? d.ports : [];
-  const used = new Set(allSvcs().filter(x => x.localPort).map(x => Number(x.localPort)));
+  const used = new Set(allSvcs().filter(x => x.localPort && isActive(x)).map(x => Number(x.localPort)));
   const remote = ports.length ? ports[0].port : '';
   let local = remote || '';
   while (local && used.has(Number(local)) && local < 65535) local++;
@@ -1220,7 +1293,7 @@ function submitPodForward(f, p) {
   if (!(lp >= 1 && lp <= 65535)) return fail(f, 'Локальный порт: число 1–65535');
   if (!(rp >= 1 && rp <= 65535)) return fail(f, 'Порт пода: число 1–65535');
   const s = podSvc(p);
-  const dup = allSvcs().find(x => x !== s && Number(x.localPort) === lp && (db.services.includes(x) || isActive(x)));
+  const dup = allSvcs().find(x => x !== s && Number(x.localPort) === lp && isActive(x));
   if (dup) return fail(f, `Порт ${lp} уже занят сервисом «${dup.name}»`);
   s.localPort = lp; s.remotePort = rp;
   eph.set(podKey(p), s);
@@ -1680,10 +1753,11 @@ function onKey(e) {
     if (ch === 'n') return chooseNamespace();
     if (ch === 'r') refreshPods();
     if (ch === 'f' && pd) return podToFavorite(pd);
+    if (ch === 'p' && pd) return directForward(pd);
   } else {
     const cur = curSvc();
     if (ch === 'a') return openServiceForm();
-    if (ch === 'e' && cur) return openServiceForm(cur);
+    if (ch === 'e' && cur) return editService(cur);
     if (ch === 'd') return askDelete();
     if (ch === 'g') return saveRunningAsGroup();
     if (ch === 'l') return openLogs();
@@ -1768,7 +1842,8 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   1 2 3 4 / Tab  вкладки: Избранное, Запущенные, Шаблоны, Кластер
   G              сохранить запущенные сервисы как шаблон
   4 Кластер      все поды кластера без ручного добавления (только просмотр): поиск, проброс порта
-                 пода (Enter), логи (L), в избранное (F), смена namespace (N), обновление (R)
+                 пода (Enter; если под относится к сервису из избранного — запускается он, на своём порту),
+                 напрямую к поду (P), логи (L), в избранное (F), смена namespace (N), обновление (R)
   K              выбор kubeconfig из папки (F2 в списке — сменить папку)
   Q / Ctrl+C     выход (пробросы останавливаются)
 
