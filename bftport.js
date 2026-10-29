@@ -387,6 +387,22 @@ function buttonRows(y, buttons) {
   return rows;
 }
 
+// Поиск у каждой вкладки свой. ui.query / qpos / qoff / searching всегда принадлежат активной вкладке; при уходе с неё
+// они откладываются в tabSearch, а при возвращении восстанавливаются (в том числе открыта ли строка поиска и где курсор).
+const tabSearch = {};
+function enterTab(t) {
+  if (t === ui.tab) return;
+  tabSearch[ui.tab] = { query: ui.query, qpos: ui.qpos, qoff: ui.qoff, searching: ui.searching };
+  const st = tabSearch[t] || { query: '', qpos: undefined, qoff: 0, searching: false };
+  ui.tab = t; ui.query = st.query; ui.qpos = st.qpos; ui.qoff = st.qoff; ui.searching = st.searching;
+}
+// переход на вкладку после действия (добавили сервис, создали шаблон…): запрос там сбрасываем, чтобы новая запись была видна;
+// поиск остальных вкладок не трогаем
+function gotoTab(t) {
+  enterTab(t);
+  ui.query = ''; ui.qpos = undefined; ui.searching = false;
+}
+
 // полнотекстовый поиск: все слова запроса должны встретиться в метаданных сервиса
 function matchKind(s) {
   const terms = ui.query.toLowerCase().split(/\s+/).filter(Boolean);
@@ -519,7 +535,7 @@ function submitGroup(f, g) {
   const ids = db.services.filter(s => f.chosen.has(s.id)).map(s => s.id);
   if (g) { g.name = name; g.services = ids; }
   else { db.groups.push({ id: uid(), name, services: ids }); ui.gsel = db.groups.length - 1; }
-  ui.tab = 'groups'; ui.query = '';
+  gotoTab('groups');
   saveDb(); closeForm();
 }
 
@@ -539,7 +555,7 @@ function renderList() {
   t.fill(C.title); rows.push(t);
 
   const tb = new Row(1);
-  const tab = (id, label) => tb.add(` ${tr(label)} `, ui.tab === id ? C.key : C.btn, () => { ui.tab = id; ui.sel = 0; ui.off = 0; ui.gsel = 0; ui.goff = 0; ui.psel = 0; ui.poff = 0; ui.pkey = ''; if (id === 'cluster') refreshPods(); draw(); }).add(' ');
+  const tab = (id, label) => tb.add(` ${tr(label)} `, ui.tab === id ? C.key : C.btn, () => { enterTab(id); ui.sel = 0; ui.off = 0; ui.gsel = 0; ui.goff = 0; ui.psel = 0; ui.poff = 0; ui.pkey = ''; if (id === 'cluster') refreshPods(); draw(); }).add(' ');
   tb.add(' ');
   tab('all', `1 Избранное (${db.services.length})`); tab('running', `2 Запущенные (${activeN})`); tab('groups', `3 Шаблоны (${db.groups.length})`); tab('cluster', `4 Кластер (${ui.pods.at ? ui.pods.list.length : '…'})`);
   tb.add('  ');
@@ -725,7 +741,7 @@ function submitService(f, s) {
   if (s) {
     Object.assign(s, data); restartNow(s);
   } else {
-    const ns = { id: uid(), ...data }; db.services.push(ns); ui.tab = 'all'; ui.query = ''; ui.sel = db.services.length - 1;
+    const ns = { id: uid(), ...data }; db.services.push(ns); gotoTab('all'); ui.sel = db.services.length - 1;
   }
   saveDb(); closeForm();
 }
@@ -1114,7 +1130,44 @@ function formatEntries(text, mode) {
   return lines.map(t => ({ text: t, lvl }));
 }
 const FMT_LABELS = ['Формат: как есть', 'Формат: logback', 'Формат: logback + JSON'];
-function cycleFmt(lv) { lv.fmt = (lv.fmt + 1) % 3; lv.fmtGen++; lv.scroll = 0; } // по кругу: как есть -> logback -> logback + JSON
+// Смена вида меняет число строк (запись с JSON разворачивается в десятки строк), поэтому смещение «в строках от конца»
+// теряет смысл. Запоминаем запись, которая была вверху окна, и строку внутри неё, и после смены вида возвращаемся к ней.
+// Если читали «живой» хвост (внизу), остаёмся внизу.
+function lvAnchor(lv) {
+  if (lv.src !== 'pod' || lv.scroll <= 0) return null;
+  const L = lvLayout(lv);
+  if (!L.lines.length || L.total <= L.n) return null;
+  const maxTop = L.total - L.n, top = maxTop - Math.min(lv.scroll, maxTop);
+  let lo = 0, hi = L.lines.length - 1;
+  while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (L.rowStart[mid] <= top) lo = mid; else hi = mid - 1; }
+  const l = L.lines[lo];
+  return { raw: l.src || l, inner: top - L.rowStart[lo] };
+}
+function lvRestore(lv, a) {
+  if (!a) { lv.scroll = 0; return; }
+  const L = lvLayout(lv), srcOf = l => l.src || l, first = new Map();
+  L.lines.forEach((l, i) => { if (!first.has(srcOf(l))) first.set(srcOf(l), i); });
+  let at = first.get(a.raw), inner = a.inner;
+  if (at === undefined) { // записи нет в новом виде (фильтр, обрезка буфера) — берём ближайшую соседнюю
+    const k = lv.pod.indexOf(a.raw);
+    inner = 0;
+    for (let d = 0; k >= 0 && d <= lv.pod.length && at === undefined; d++) {
+      for (const idx of [k + d, k - d]) if (at === undefined && lv.pod[idx] && first.has(lv.pod[idx])) at = first.get(lv.pod[idx]);
+    }
+  }
+  if (at === undefined) { lv.scroll = 0; return; }
+  const rowsOf = i => (lv.wrap ? Math.max(1, Math.ceil(L.lines[i].text.length / L.width)) : 1);
+  let end = at;
+  while (end + 1 < L.lines.length && srcOf(L.lines[end + 1]) === srcOf(L.lines[at])) end++;
+  const span = L.rowStart[end] + rowsOf(end) - L.rowStart[at]; // сколько строк запись занимает теперь
+  const maxTop = Math.max(0, L.total - L.n), newTop = Math.min(maxTop, L.rowStart[at] + Math.min(inner, span - 1));
+  lv.scroll = Math.max(0, maxTop - newTop);
+}
+function cycleFmt(lv) { // по кругу: как есть -> logback -> logback + JSON
+  const a = lvAnchor(lv);
+  lv.fmt = (lv.fmt + 1) % 3; lv.fmtGen++;
+  lvRestore(lv, a);
+}
 
 function formatLog(text) {
   const f = parseLogJson(text);
@@ -1176,7 +1229,7 @@ async function podToFavorite(p) {
   }
   const have = db.services.find(x => x.namespace === p.ns && x.service === svc.metadata.name);
   if (have) {
-    ui.tab = 'all'; ui.query = ''; ui.sel = Math.max(0, db.services.indexOf(have)); ui.off = 0;
+    gotoTab('all'); ui.sel = Math.max(0, db.services.indexOf(have)); ui.off = 0;
     flash(`«${D(have.name)}» уже в избранном`); return draw();
   }
   let port = svc.spec.ports[0];
@@ -1695,7 +1748,9 @@ async function choosePod(lv) {
 function viewOf(lv, e) {
   if (e.vg !== lv.fmtGen) {
     e.vg = lv.fmtGen;
-    e.view = (!e.err && !e.sys && formatEntries(e.text, lv.fmt)) || [e];
+    const v = !e.err && !e.sys && formatEntries(e.text, lv.fmt);
+    if (v) for (const pt of v) pt.src = e;
+    e.view = v || [e];
   }
   return e.view;
 }
@@ -2240,7 +2295,7 @@ function onKey(e) {
   const sk = isG ? 'gsel' : isC ? 'psel' : 'sel';
   const n = isG ? groupsVisible().length : isC ? podsVisible().length : visible().length;
   const TABS = ['all', 'running', 'groups', 'cluster'];
-  const setTab = t => { ui.tab = t; ui.sel = 0; ui.off = 0; ui.gsel = 0; ui.goff = 0; ui.psel = 0; ui.poff = 0; ui.pkey = ''; if (t === 'cluster') refreshPods(); };
+  const setTab = t => { enterTab(t); ui.sel = 0; ui.off = 0; ui.gsel = 0; ui.goff = 0; ui.psel = 0; ui.poff = 0; ui.pkey = ''; if (t === 'cluster') refreshPods(); };
   const nextTab = () => setTab(TABS[(TABS.indexOf(ui.tab) + 1) % TABS.length]);
   if (ui.searching) {
     switch (e.k) {
