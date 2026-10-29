@@ -1305,7 +1305,7 @@ function openPodLogs(p) {
   ui.lv = { svc: s, src: 'pod', pod: [], scroll: 0, filter: '', searching: false, wrap: true, proc: null, timer: null, closed: false,
     gen: 0, retries: 0, endedAt: 0, msg: 'подключение…', selector: '', carryO: '', carryE: '',
     mode: 'one', podName: p.name, podInfo: { name: p.name, start: d ? d.start : '', phase: p.status, container: '', containers: d ? d.containers.length : 0 },
-    podCount: 1, fmt: true, fmtGen: 0, container: '' };
+    podCount: 1, fmt: true, fmtGen: 0, fmode: 'hl', curRef: null, container: '' };
   ui.mode = 'logs';
   podLogsStart(ui.lv); draw();
 }
@@ -1339,7 +1339,7 @@ function openLogs() {
   const s = curSvc(); if (!s) return;
   ui.lv = { svc: s, src: 'pod', pod: [], scroll: 0, filter: '', searching: false, wrap: true, proc: null, timer: null, closed: false,
     gen: 0, retries: 0, endedAt: 0, msg: 'подключение…', selector: '', carryO: '', carryE: '',
-    mode: null, podName: '', podInfo: null, podCount: 0, fmt: true, fmtGen: 0 }; // mode: null (ещё не выбрано) | 'one' | 'all'
+    mode: null, podName: '', podInfo: null, podCount: 0, fmt: true, fmtGen: 0, fmode: 'hl', curRef: null }; // mode: null (ещё не выбрано) | 'one' | 'all'
   ui.mode = 'logs';
   podLogsStart(ui.lv); draw();
 }
@@ -1494,7 +1494,85 @@ function viewOf(lv, e) {
 function lvSource(lv) {
   const src = lv.src === 'pod' ? lv.pod.flatMap(e => viewOf(lv, e)) : rt(lv.svc).log.map(l => ({ text: l.t + ' ' + l.text, sys: l.sys }));
   const q = lv.filter.toLowerCase();
-  return q ? src.filter(l => l.text.toLowerCase().includes(q)) : src;
+  return q && lv.fmode === 'filter' ? src.filter(l => l.text.toLowerCase().includes(q)) : src;
+}
+
+// ── поиск как в IntelliJ: подсветка всех совпадений, текущее ярче, счётчик, переходы, прокрутка «по центру»
+const HL = '\x1b[30;48;5;179m', HL_CUR = '\x1b[1;30;48;5;208m';
+function lvLayout(lv) {
+  const n = Math.max(3, H - 4), width = Math.max(10, W - 2);
+  const lines = lvSource(lv), rowStart = new Array(lines.length);
+  let total = 0;
+  for (let i = 0; i < lines.length; i++) { rowStart[i] = total; total += lv.wrap ? Math.max(1, Math.ceil(lines[i].text.length / width)) : 1; }
+  return { n, width, lines, rowStart, total };
+}
+// все вхождения запроса: occ[i] — диапазоны в строке i, list — плоский список для навигации
+function lvFind(lv, lines) {
+  const occ = new Array(lines.length).fill(null), list = [];
+  if (!lv.filter) return { occ, list };
+  const re = new RegExp(lv.filter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].text; let m, k = 0, arr = null;
+    re.lastIndex = 0;
+    while ((m = re.exec(t))) {
+      (arr || (arr = [])).push([m.index, m.index + m[0].length]);
+      list.push({ i, k, s: m.index }); k++;
+      if (m[0].length === 0) re.lastIndex++;
+    }
+    occ[i] = arr;
+  }
+  return { occ, list };
+}
+const lvCurIdx = (lv, lines, list) => { const r = lv.curRef; return r ? list.findIndex(m => lines[m.i] === r.e && m.k === r.k) : -1; };
+// Перейти к совпадению idx. Вокруг центра окна есть «зона покоя» (±60% от половины высоты): если совпадение внутри —
+// просто подсвечиваем его, если снаружи (или не видно) — прокручиваем так, чтобы оно оказалось по центру.
+function lvGoto(lv, L, F, idx) {
+  const cnt = F.list.length;
+  idx = ((idx % cnt) + cnt) % cnt;
+  const m = F.list[idx];
+  lv.curRef = { e: L.lines[m.i], k: m.k };
+  if (L.total <= L.n) return; // весь лог на экране, прокручивать нечего
+  const mrow = L.rowStart[m.i] + (lv.wrap ? Math.floor(m.s / L.width) : 0);
+  const maxTop = L.total - L.n;
+  const top = Math.max(0, Math.min(maxTop, maxTop - lv.scroll));
+  const rel = mrow - top, c = (L.n - 1) / 2, band = 0.6 * (L.n / 2);
+  if (rel >= 0 && rel < L.n && Math.abs(rel - c) <= band) return;
+  const newTop = Math.max(0, Math.min(maxTop, Math.round(mrow - c)));
+  lv.scroll = maxTop - newTop;
+}
+// запрос изменился: выбираем ближайшее к центру окна совпадение (ниже центра, а если таких нет — последнее)
+function lvQueryChanged(lv) {
+  const L = lvLayout(lv), F = lvFind(lv, L.lines);
+  if (!F.list.length) { lv.curRef = null; return; }
+  const maxTop = Math.max(0, L.total - L.n), top = Math.max(0, Math.min(maxTop, maxTop - lv.scroll));
+  const pad = Math.max(0, L.n - L.total), centerRow = top + (L.n - 1) / 2 - pad;
+  const rowOf = m => L.rowStart[m.i] + (lv.wrap ? Math.floor(m.s / L.width) : 0);
+  let idx = F.list.findIndex(m => rowOf(m) >= centerRow);
+  if (idx < 0) idx = F.list.length - 1;
+  lvGoto(lv, L, F, idx);
+}
+// режим сменился: остаёмся на том же совпадении, если оно ещё есть
+function lvKeep(lv) {
+  const L = lvLayout(lv), F = lvFind(lv, L.lines), cur = lvCurIdx(lv, L.lines, F.list);
+  if (cur >= 0) lvGoto(lv, L, F, cur); else lvQueryChanged(lv);
+}
+function lvStep(lv, d) {
+  const L = lvLayout(lv), F = lvFind(lv, L.lines);
+  if (!F.list.length) return;
+  const cur = lvCurIdx(lv, L.lines, F.list);
+  if (cur < 0) return lvQueryChanged(lv);
+  lvGoto(lv, L, F, cur + d);
+}
+function addHl(row, text, off, ranges, curK, base) {
+  let pos = 0;
+  ranges.forEach(([a0, b0], k) => {
+    const a = Math.max(a0 - off, pos), b = Math.min(b0 - off, text.length);
+    if (b <= a) return;
+    if (a > pos) row.add(text.slice(pos, a), base);
+    row.add(text.slice(a, b), k === curK ? HL_CUR : HL);
+    pos = b;
+  });
+  if (pos < text.length) row.add(text.slice(pos), base);
 }
 function lvStyle(l) {
   if (l.dim) return C.gray;
@@ -1526,6 +1604,9 @@ function renderLogs() {
   let total = 0;
   for (const l of lines) total += lv.wrap ? Math.max(1, Math.ceil(l.text.length / width)) : 1;
   lv.scroll = Math.max(0, Math.min(lv.scroll, Math.max(0, total - n)));
+  const F = lv.filter ? lvFind(lv, lines) : null;
+  const ci = F ? lvCurIdx(lv, lines, F.list) : -1;
+  const curLine = ci >= 0 ? F.list[ci].i : -1, curK = ci >= 0 ? F.list[ci].k : -1;
 
   const tb = new Row(1).add(' ');
   const srcBtn = (id, label) => tb.add(` ${label} `, lv.src === id ? C.key : C.btn, () => { lv.src = id; lv.scroll = 0; draw(); }).add(' ');
@@ -1537,6 +1618,8 @@ function renderLogs() {
     tb.add(' ⌕ ', fs_, () => { lv.searching = true; draw(); });
     addInput(tb, lv, 'filter', 'fpos', 'foff', Math.max(10, Math.min(40, W - tb.x - 24)), fs_, lv.searching, () => { lv.searching = true; draw(); });
     tb.add(' ', fs_);
+    if (F) tb.add(F.list.length ? ` ${ci >= 0 ? ci + 1 : '–'}/${F.list.length} ` : ' нет совпадений ', F.list.length ? C.green : C.red);
+    tb.add(lv.fmode === 'filter' ? ' фильтр (Tab) ' : ' подсветка (Tab) ', C.dim);
   }
   if (lv.src === 'pod') tb.add(' ' + lv.msg, lv.proc ? C.gray : C.yellow);
   tb.fill(); rows.push(tb);
@@ -1551,21 +1634,25 @@ function renderLogs() {
     else parts.push(l.text.length > width ? l.text.slice(0, width - 1) + '…' : l.text);
     for (let j = parts.length - 1; j >= 0 && out.length < n; j--) {
       if (skip > 0) { skip--; continue; }
-      out.push({ t: parts[j], l });
+      out.push({ t: parts[j], l, i, off: lv.wrap ? j * width : 0 });
     }
   }
   out.reverse();
   for (let i = 0; i < n; i++) {
     const row = new Row(2 + i), o = out[i - (n - out.length)];
-    if (o) row.add(' ' + o.t, lvStyle(o.l));
+    if (o) {
+      row.add(' ');
+      const rg = F && F.occ[o.i];
+      if (rg) addHl(row, o.t, o.off, rg, o.i === curLine ? curK : -1, lvStyle(o.l)); else row.add(o.t, lvStyle(o.l));
+    }
     else if (!lines.length && i === 1) row.add(lv.src === 'pod' ? '  Ждём строки логов…' : '  В выводе port-forward пока пусто', C.gray);
     row.fill(); rows.push(row);
   }
 
   const btns = [
-    { key: '↑↓', label: 'Прокрутка', fn: () => {} },
+    { key: '↑↓', label: lv.filter ? 'Совпадения' : 'Прокрутка', fn: () => {} },
     { key: 'End', label: 'К концу', fn: () => { lv.scroll = 0; draw(); } },
-    { key: '/', label: 'Фильтр', fn: () => { lv.searching = true; draw(); } },
+    { key: '/', label: 'Поиск', fn: () => { lv.searching = true; draw(); } },
     { key: 'F', label: lv.fmt ? 'Формат: logback' : 'Формат: как есть', fn: () => { lv.fmt = !lv.fmt; lv.fmtGen++; lv.scroll = 0; draw(); } },
     { key: 'W', label: lv.wrap ? 'Не переносить' : 'Переносить', fn: () => { lv.wrap = !lv.wrap; draw(); } },
     { key: 'P', label: s.kind === 'pod' ? 'Контейнер' : 'Сменить под', fn: () => choosePod(lv) },
@@ -1576,28 +1663,32 @@ function renderLogs() {
   ];
   const br = buttonRows(H - 2, btns);
   for (const r of br) { r.fill(); rows.push(r); }
-  if (br.length < 2) rows.push(new Row(H - 1).add(' колесо мыши / PgUp / PgDn / Home / End — прокрутка · Ctrl+U — сбросить фильтр', C.gray).fill());
+  if (br.length < 2) rows.push(new Row(H - 1).add(' колесо / PgUp / PgDn / Home / End — прокрутка · в поиске: ↑↓ Enter F3 — совпадения, Tab — подсветка/фильтр, Esc — закрыть', C.gray).fill());
   return rows;
 }
 function logsKey(e) {
   const lv = ui.lv, n = Math.max(3, H - 4);
   if (lv.searching) {
+    const was = lv.filter;
     switch (e.k) {
-      case 'esc': lv.filter = ''; lv.fpos = 0; lv.searching = false; break;
-      case 'enter': lv.searching = false; break;
+      case 'esc': lv.filter = ''; lv.fpos = 0; lv.searching = false; lv.curRef = null; return draw();
+      case 'enter': case 'down': case 'f3': lvStep(lv, 1); return draw();
+      case 'up': case 'sf3': lvStep(lv, -1); return draw();
+      case 'pgup': lv.scroll += n - 1; return draw();
+      case 'pgdn': lv.scroll = Math.max(0, lv.scroll - (n - 1)); return draw();
+      case 'tab': lv.fmode = lv.fmode === 'hl' ? 'filter' : 'hl'; lvKeep(lv); return draw();
       case 'ctrl-c': return closeLogs();
-      case 'bs': if (!lv.filter) { lv.searching = false; break; } // иначе — обычное стирание
+      case 'bs': if (!lv.filter) { lv.searching = false; return draw(); } // иначе — обычное стирание
       // fallthrough
-      default: edit(lv, 'filter', 'fpos', e);
+      default: if (edit(lv, 'filter', 'fpos', e) && lv.filter !== was) lvQueryChanged(lv);
     }
-    lv.scroll = 0;
     return draw();
   }
-  // вставка вне режима фильтра сразу становится фильтром (например, UUID)
-  if (e.k === 'paste') { lv.filter = e.text; lv.fpos = undefined; lv.scroll = 0; return draw(); }
+  // вставка вне поиска сразу открывает его с вставленным текстом (например, UUID)
+  if (e.k === 'paste') { lv.filter = e.text; lv.fpos = undefined; lv.searching = true; lvQueryChanged(lv); return draw(); }
   const ch = e.k === 'char' ? (LAT[e.ch.toLowerCase()] || e.ch.toLowerCase()) : '';
   switch (e.k) {
-    case 'esc': if (lv.filter) { lv.filter = ''; lv.scroll = 0; break; } return closeLogs();
+    case 'esc': if (lv.filter) { lv.filter = ''; lv.curRef = null; lv.scroll = 0; break; } return closeLogs();
     case 'ctrl-c': return closeLogs();
     case 'up': lv.scroll += 1; break;
     case 'down': lv.scroll = Math.max(0, lv.scroll - 1); break;
@@ -1607,7 +1698,7 @@ function logsKey(e) {
     case 'end': lv.scroll = 0; break;
     case 'tab': lv.src = lv.src === 'pod' ? 'pf' : 'pod'; lv.scroll = 0; break;
     case 'ctrl-f': lv.searching = true; break;
-    case 'ctrl-u': lv.filter = ''; lv.scroll = 0; break;
+    case 'ctrl-u': lv.filter = ''; lv.curRef = null; lv.scroll = 0; break;
   }
   if (e.k === 'char' && e.ch === '/') lv.searching = true;
   if (e.k === 'char' && e.ch === '1') { lv.src = 'pod'; lv.scroll = 0; }
@@ -1617,7 +1708,7 @@ function logsKey(e) {
   if (ch === 'f') { lv.fmt = !lv.fmt; lv.fmtGen++; lv.scroll = 0; }
   if (ch === 'r') podLogsRestart(lv);
   if (ch === 'p') return choosePod(lv);
-  if (ch === 'c') { lv.pod = []; lv.scroll = 0; }
+  if (ch === 'c') { lv.pod = []; lv.curRef = null; lv.scroll = 0; }
   draw();
 }
 
@@ -1626,7 +1717,7 @@ const KEYS = {
   '\x1b[A': 'up', '\x1b[B': 'down', '\x1b[C': 'right', '\x1b[D': 'left', '\x1b[H': 'home', '\x1b[F': 'end',
   '\x1b[1~': 'home', '\x1b[4~': 'end', '\x1b[3~': 'del', '\x1b[5~': 'pgup', '\x1b[6~': 'pgdn', '\x1b[Z': 'stab',
   '\x1bOQ': 'f2', '\x1b[12~': 'f2', '\x1bOA': 'up', '\x1bOB': 'down', '\x1bOH': 'home', '\x1bOF': 'end', '\x1b[7~': 'home', '\x1b[8~': 'end',
-  '\x1b[1;5D': 'wleft', '\x1b[1;5C': 'wright', '\x1b[1;3D': 'wleft', '\x1b[1;3C': 'wright', '\x1b[2;2~': 'ctrl-v',
+  '\x1bOR': 'f3', '\x1b[13~': 'f3', '\x1b[1;2R': 'sf3', '\x1b[25~': 'sf3', '\x1b[1;5D': 'wleft', '\x1b[1;5C': 'wright', '\x1b[1;3D': 'wleft', '\x1b[1;3C': 'wright', '\x1b[2;2~': 'ctrl-v',
 };
 const TOKEN = /\x1b\[<(\d+);(\d+);(\d+)([Mm])|\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1bO[A-Z]|\x1b|[\s\S]/gu;
 
@@ -1834,7 +1925,8 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   A  добавить           E  изменить         D / Del  удалить
   S  запустить все видимые                  X  остановить все видимые
   L  логи пода на весь экран (как в Lens): один под — сразу, несколько — выбор
-     со временем старта; в просмотре P — сменить под, / — фильтр, W — перенос,
+     со временем старта; в просмотре P — сменить под, / — поиск (как в IntelliJ: подсветка,
+     счётчик, ↑↓/Enter/F3 — по совпадениям; Tab — режим «фильтр»), W — перенос,
      F — формат: JSON-логи приводятся к шаблону logback (~/.m2/logback-local.xml)
   /  или Ctrl+F  поиск (имя, namespace, service, порт, статус); Esc — сбросить
   Во всех полях ввода: ←→ Home End Del — курсор, Ctrl+←/→ — по словам, Ctrl+W — слово назад,
