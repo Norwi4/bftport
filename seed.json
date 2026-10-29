@@ -2,6 +2,7 @@
   "kubeconfig": "",
   "services": [
     {
+      "id": "820njo2b",
       "name": "transact-manager",
       "namespace": "ps",
       "service": "transact-manager",
@@ -11,6 +12,7 @@
       "autostart": false
     },
     {
+      "id": "wdzrt03n",
       "name": "noble-registry",
       "namespace": "ps",
       "service": "noble-registry-service",
@@ -20,6 +22,7 @@
       "autostart": false
     },
     {
+      "id": "ifwrxfq4",
       "name": "idempotence-manager",
       "namespace": "ps",
       "service": "idempotence-manager",
@@ -29,6 +32,7 @@
       "autostart": false
     },
     {
+      "id": "lsq31wod",
       "name": "gen-number-doc",
       "namespace": "ecp",
       "service": "generate-number-document-service",
@@ -38,6 +42,7 @@
       "autostart": false
     },
     {
+      "id": "8sc8fl0v",
       "name": "authz",
       "namespace": "ps",
       "service": "authz",
@@ -47,6 +52,7 @@
       "autostart": false
     },
     {
+      "id": "18kah4f0",
       "name": "vziskaniya-or-agg",
       "namespace": "ecp",
       "service": "vziskaniya-or-agg",
@@ -54,6 +60,41 @@
       "remotePort": "grpc",
       "kubeconfig": "",
       "autostart": false
+    },
+    {
+      "id": "02grf2y3",
+      "name": "uos-integration-service",
+      "namespace": "ecp-uos",
+      "service": "uos-integration-service",
+      "localPort": 60520,
+      "remotePort": "grpc",
+      "kubeconfig": "",
+      "autostart": false
+    },
+    {
+      "id": "kdh10ef0",
+      "name": "vziskaniya-or-bpmn",
+      "namespace": "ecp",
+      "service": "vziskaniya-or-bpmn",
+      "localPort": 28804,
+      "remotePort": "grpc",
+      "kubeconfig": "",
+      "autostart": false
+    }
+  ],
+  "groups": [
+    {
+      "id": "x06dvfj6",
+      "name": "vziskaniya-or-bpmn",
+      "services": [
+        "820njo2b",
+        "wdzrt03n",
+        "ifwrxfq4",
+        "lsq31wod",
+        "8sc8fl0v",
+        "18kah4f0",
+        "02grf2y3"
+      ]
     }
   ]
 }
