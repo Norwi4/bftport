@@ -369,6 +369,7 @@ function render() {
   else if (ui.mode === 'picker') rows = renderPicker();
   else if (ui.mode === 'logs') rows = renderLogs();
   else rows = renderList();
+  if (ui.mode === 'confirm') rows = confirmOverlay(rows); // диалог подтверждения поверх любой вкладки
   let out = '\x1b[?25l';
   for (let i = 0; i < H; i++) out += `\x1b[${i + 1};1H` + (rows[i] ? rows[i].out : ' '.repeat(W));
   process.stdout.write(out);
@@ -483,7 +484,6 @@ function renderGroups(rows) {
     { key: 'Q', label: 'Выход', fn: () => quit() },
   ];
   for (const r of buttonRows(4 + listH + logH, btns)) { r.fill(); rows.push(r); }
-  if (ui.mode === 'confirm') return confirmOverlay(rows);
   return rows;
 }
 
@@ -619,7 +619,6 @@ function renderList() {
   ];
   const br = buttonRows(fy, btns);
   for (const r of br) { r.fill(); rows.push(r); }
-  if (ui.mode === 'confirm') return confirmOverlay(rows);
   return rows;
 }
 
