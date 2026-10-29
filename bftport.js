@@ -134,7 +134,10 @@ function restartNow(s) {
   if (r.proc) { r.quick = true; try { r.proc.kill(); } catch (_) {} }
 }
 const isActive = s => { const r = rt(s); return r.want || !!r.proc; };
-function killAll() { for (const s of db.services) { const r = rt(s); r.want = false; if (r.proc) try { r.proc.kill(); } catch (_) {} } }
+function killAll() {
+  for (const s of db.services) { const r = rt(s); r.want = false; if (r.proc) try { r.proc.kill(); } catch (_) {} }
+  if (ui.lv && ui.lv.proc) try { ui.lv.proc.kill(); } catch (_) {}
+}
 
 function kube(kc, args) {
   return new Promise((resolve, reject) => {
@@ -153,6 +156,7 @@ const ui = {
   sel: 0, off: 0,
   form: null, picker: null, confirm: null,
   tab: 'all',          // all | running
+  lv: null,            // состояние просмотра логов
   gsel: 0, goff: 0,    // выбранный шаблон на вкладке «Шаблоны»
   query: '', searching: false,
   lastClick: { id: null, t: 0 },
@@ -160,7 +164,7 @@ const ui = {
 };
 let W = 80, H = 24, hits = [];
 
-const LAT = { 'й': 'q', 'ф': 'a', 'у': 'e', 'в': 'd', 'ы': 's', 'ч': 'x', 'л': 'k', 'н': 'y', 'т': 'n', 'ш': 'i', 'п': 'g' };
+const LAT = { 'й': 'q', 'ф': 'a', 'у': 'e', 'в': 'd', 'ы': 's', 'ч': 'x', 'л': 'k', 'н': 'y', 'т': 'n', 'ш': 'i', 'п': 'g', 'д': 'l', 'ц': 'w', 'к': 'r', 'с': 'c' };
 
 // стили
 const RS = '\x1b[0m';
@@ -203,6 +207,7 @@ function render() {
   let rows;
   if (ui.mode === 'form') rows = renderForm();
   else if (ui.mode === 'picker') rows = renderPicker();
+  else if (ui.mode === 'logs') rows = renderLogs();
   else rows = renderList();
   let out = '\x1b[?25l';
   for (let i = 0; i < H; i++) out += `\x1b[${i + 1};1H` + (rows[i] ? rows[i].out : ' '.repeat(W));
@@ -421,7 +426,7 @@ function renderList() {
 
   const cur = svcs[ui.sel];
   const sep = new Row(3 + listH);
-  sep.add(' Логи' + (cur ? ': ' + cur.name : '') + ' ', C.head).fill(C.head); rows.push(sep);
+  sep.add(' Логи' + (cur ? ': ' + cur.name : '') + ' ', C.head, () => openLogs()).add(cur ? ' L — открыть на весь экран (логи пода) ' : '', C.head, () => openLogs()).fill(C.head); rows.push(sep);
   const log = cur ? rt(cur).log : [];
   const shown = log.slice(-logH);
   for (let i = 0; i < logH; i++) {
@@ -438,6 +443,7 @@ function renderList() {
     { key: 'D', label: 'Удалить', fn: () => askDelete() },
     { key: 'S', label: 'Старт все', fn: () => { visible().forEach(start); } },
     { key: 'X', label: 'Стоп все', fn: () => { visible().forEach(stop); draw(); } },
+    { key: 'L', label: 'Логи пода', fn: () => openLogs() },
     { key: 'G', label: 'В шаблон', fn: () => saveRunningAsGroup() },
     { key: '/', label: 'Поиск', fn: () => { ui.searching = true; draw(); } },
     { key: 'K', label: 'Конфиг', fn: () => switchKubeconfig() },
@@ -743,6 +749,188 @@ async function discover(f) {
   f.focus = 0; draw();
 }
 
+// ───────────────────────── логи пода (как в Lens) ─────────────────────────
+const LOG_BUF = 5000;
+const cleanLine = t => t.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '').replace(/\t/g, '  ').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
+
+function openLogs() {
+  const s = curSvc(); if (!s) return;
+  ui.lv = { svc: s, src: 'pod', pod: [], scroll: 0, filter: '', searching: false, wrap: true, proc: null, timer: null, closed: false,
+    gen: 0, retries: 0, endedAt: 0, msg: 'подключение…', selector: '', carryO: '', carryE: '' };
+  ui.mode = 'logs';
+  podLogsStart(ui.lv); draw();
+}
+function closeLogs() {
+  const lv = ui.lv; if (!lv) return;
+  lv.closed = true; clearTimeout(lv.timer);
+  if (lv.proc) { const p = lv.proc; lv.proc = null; try { p.kill(); } catch (_) {} }
+  ui.lv = null; ui.mode = 'list'; draw();
+}
+function podLogsRestart(lv) {
+  clearTimeout(lv.timer); lv.timer = null;
+  if (lv.proc) { const p = lv.proc; lv.proc = null; try { p.kill(); } catch (_) {} }
+  lv.pod = []; lv.scroll = 0; lv.retries = 0; lv.endedAt = 0; lv.carryO = lv.carryE = '';
+  podLogsStart(lv);
+}
+function podRetry(lv) {
+  lv.retries++;
+  const delay = Math.min(3000 * lv.retries, 15000);
+  lv.timer = setTimeout(() => { lv.timer = null; if (!lv.closed) podLogsStart(lv); }, delay);
+}
+function podFeed(lv, d, isErr) {
+  const key = isErr ? 'carryE' : 'carryO';
+  const parts = (lv[key] + d).split(/\r?\n/);
+  lv[key] = parts.pop();
+  if (!parts.length) return;
+  for (const t of parts) lv.pod.push({ text: cleanLine(t), err: isErr });
+  if (lv.pod.length > LOG_BUF) lv.pod.splice(0, lv.pod.length - LOG_BUF);
+  if (lv.scroll > 0) lv.scroll += parts.length; // не «уплываем» от строки, пока читаем историю
+  if (!isErr) lv.retries = 0;
+  draw();
+}
+async function podLogsStart(lv) {
+  const s = lv.svc, kc = kubeconfigOf(s), my = ++lv.gen;
+  lv.msg = 'получаю selector сервиса…'; draw();
+  let sel;
+  try {
+    const svc = await kube(kc, ['-n', s.namespace, 'get', 'svc', s.service, '-o', 'json']);
+    sel = Object.entries(svc.spec.selector || {}).map(([k, v]) => `${k}=${v}`).join(',');
+    if (!sel) throw new Error('у сервиса нет selector, логи подов недоступны');
+  } catch (e) {
+    if (lv.closed || my !== lv.gen) return;
+    lv.msg = 'ошибка: ' + e.message + ' — повтор…';
+    lv.pod.push({ text: '⚠ ' + e.message, sys: true });
+    podRetry(lv); return draw();
+  }
+  if (lv.closed || my !== lv.gen) return;
+  lv.selector = sel;
+  // при переподключении берём только то, что появилось с момента обрыва (чтобы не дублировать историю)
+  const args = ['-n', s.namespace, 'logs', '-l', sel, '-f', '--prefix', '--max-log-requests=20'];
+  if (lv.endedAt) args.push(`--since=${Math.ceil((Date.now() - lv.endedAt) / 1000) + 1}s`, '--tail=-1'); else args.push('--tail=300');
+  if (kc) args.push('--kubeconfig=' + kc);
+  let p;
+  try { p = spawn('kubectl', args, { windowsHide: true }); }
+  catch (e) { lv.msg = 'ошибка: ' + e.message; return draw(); }
+  lv.proc = p; lv.msg = 'поток открыт'; draw();
+  p.stdout.setEncoding('utf8'); p.stderr.setEncoding('utf8');
+  p.stdout.on('data', d => podFeed(lv, d, false));
+  p.stderr.on('data', d => podFeed(lv, d, true));
+  p.on('error', e => { if (lv.proc !== p) return; lv.msg = e.code === 'ENOENT' ? 'kubectl не найден в PATH' : e.message; draw(); });
+  p.on('exit', code => {
+    if (lv.proc !== p) return; // этот поток уже заменён или закрыт
+    lv.proc = null; lv.endedAt = Date.now();
+    for (const [k, err] of [['carryO', false], ['carryE', true]]) if (lv[k]) { lv.pod.push({ text: cleanLine(lv[k]), err }); lv[k] = ''; }
+    lv.msg = `поток завершён (код ${code}), переподключение…`;
+    podRetry(lv); draw();
+  });
+}
+
+function lvSource(lv) {
+  const src = lv.src === 'pod' ? lv.pod : rt(lv.svc).log.map(l => ({ text: l.t + ' ' + l.text, sys: l.sys }));
+  const q = lv.filter.toLowerCase();
+  return q ? src.filter(l => l.text.toLowerCase().includes(q)) : src;
+}
+function lvStyle(l) {
+  if (l.err) return C.red;
+  if (l.sys) return C.sys;
+  if (/\b(ERROR|FATAL|PANIC|CRITICAL)\b|"level"\s*:\s*"(error|fatal|panic)"|\blevel=(error|fatal)\b/.test(l.text)) return C.red;
+  if (/\b(WARN|WARNING)\b|"level"\s*:\s*"warn(ing)?"|\blevel=warn/.test(l.text)) return C.yellow;
+  return '';
+}
+function renderLogs() {
+  const lv = ui.lv, rows = [], s = lv.svc;
+  const n = Math.max(3, H - 4), width = Math.max(10, W - 2);
+  rows.push(new Row(0).add(` Логи: ${s.name} `, C.title).add(` ${s.namespace}/${s.service} `, C.title).fill(C.title));
+
+  const lines = lvSource(lv);
+  let total = 0;
+  for (const l of lines) total += lv.wrap ? Math.max(1, Math.ceil(l.text.length / width)) : 1;
+  lv.scroll = Math.max(0, Math.min(lv.scroll, Math.max(0, total - n)));
+
+  const tb = new Row(1).add(' ');
+  const srcBtn = (id, label) => tb.add(` ${label} `, lv.src === id ? C.key : C.btn, () => { lv.src = id; lv.scroll = 0; draw(); }).add(' ');
+  srcBtn('pod', '1 Под'); srcBtn('pf', '2 Port-forward');
+  tb.add(lv.scroll > 0 ? ' ⏸ пауза ' : ' ● live ', lv.scroll > 0 ? C.yellow : C.green, () => { lv.scroll = 0; draw(); });
+  tb.add(` ${lines.length} строк `, C.dim);
+  if (lv.filter || lv.searching) tb.add(' ⌕ ' + lv.filter + (lv.searching ? '▌' : '') + ' ', lv.searching ? C.inputF : C.input);
+  if (lv.src === 'pod') tb.add(' ' + lv.msg, lv.proc ? C.gray : C.yellow);
+  tb.fill(); rows.push(tb);
+
+  // собираем n нижних экранных строк с учётом прокрутки и переноса
+  const out = [];
+  let skip = lv.scroll;
+  for (let i = lines.length - 1; i >= 0 && out.length < n; i--) {
+    const l = lines[i];
+    const parts = [];
+    if (lv.wrap) { for (let k = 0; k < Math.max(1, l.text.length); k += width) parts.push(l.text.slice(k, k + width)); }
+    else parts.push(l.text.length > width ? l.text.slice(0, width - 1) + '…' : l.text);
+    for (let j = parts.length - 1; j >= 0 && out.length < n; j--) {
+      if (skip > 0) { skip--; continue; }
+      out.push({ t: parts[j], l });
+    }
+  }
+  out.reverse();
+  for (let i = 0; i < n; i++) {
+    const row = new Row(2 + i), o = out[i - (n - out.length)];
+    if (o) row.add(' ' + o.t, lvStyle(o.l));
+    else if (!lines.length && i === 1) row.add(lv.src === 'pod' ? '  Ждём строки логов…' : '  В выводе port-forward пока пусто', C.gray);
+    row.fill(); rows.push(row);
+  }
+
+  const btns = [
+    { key: '↑↓', label: 'Прокрутка', fn: () => {} },
+    { key: 'End', label: 'К концу', fn: () => { lv.scroll = 0; draw(); } },
+    { key: '/', label: 'Фильтр', fn: () => { lv.searching = true; draw(); } },
+    { key: 'W', label: lv.wrap ? 'Не переносить' : 'Переносить', fn: () => { lv.wrap = !lv.wrap; draw(); } },
+    { key: 'R', label: 'Перечитать', fn: () => { podLogsRestart(lv); draw(); } },
+    { key: 'C', label: 'Очистить', fn: () => { lv.pod = []; lv.scroll = 0; draw(); } },
+    { key: 'Tab', label: 'Источник', fn: () => { lv.src = lv.src === 'pod' ? 'pf' : 'pod'; lv.scroll = 0; draw(); } },
+    { key: 'Esc', label: 'Назад', fn: closeLogs },
+  ];
+  const br = buttonRows(H - 2, btns);
+  for (const r of br) { r.fill(); rows.push(r); }
+  if (br.length < 2) rows.push(new Row(H - 1).add(' колесо мыши / PgUp / PgDn / Home / End — прокрутка · Ctrl+U — сбросить фильтр', C.gray).fill());
+  return rows;
+}
+function logsKey(e) {
+  const lv = ui.lv, n = Math.max(3, H - 4);
+  if (lv.searching) {
+    switch (e.k) {
+      case 'esc': lv.filter = ''; lv.searching = false; break;
+      case 'enter': lv.searching = false; break;
+      case 'bs': if (lv.filter) lv.filter = lv.filter.slice(0, -1); else lv.searching = false; break;
+      case 'ctrl-u': lv.filter = ''; break;
+      case 'space': lv.filter += ' '; break;
+      case 'char': lv.filter += e.ch; break;
+      case 'ctrl-c': return closeLogs();
+    }
+    lv.scroll = 0;
+    return draw();
+  }
+  const ch = e.k === 'char' ? (LAT[e.ch.toLowerCase()] || e.ch.toLowerCase()) : '';
+  switch (e.k) {
+    case 'esc': if (lv.filter) { lv.filter = ''; lv.scroll = 0; break; } return closeLogs();
+    case 'ctrl-c': return closeLogs();
+    case 'up': lv.scroll += 1; break;
+    case 'down': lv.scroll = Math.max(0, lv.scroll - 1); break;
+    case 'pgup': lv.scroll += n - 1; break;
+    case 'pgdn': lv.scroll = Math.max(0, lv.scroll - (n - 1)); break;
+    case 'home': lv.scroll = 1e9; break;
+    case 'end': lv.scroll = 0; break;
+    case 'tab': lv.src = lv.src === 'pod' ? 'pf' : 'pod'; lv.scroll = 0; break;
+    case 'ctrl-f': lv.searching = true; break;
+    case 'ctrl-u': lv.filter = ''; lv.scroll = 0; break;
+  }
+  if (e.k === 'char' && e.ch === '/') lv.searching = true;
+  if (e.k === 'char' && e.ch === '1') { lv.src = 'pod'; lv.scroll = 0; }
+  if (e.k === 'char' && e.ch === '2') { lv.src = 'pf'; lv.scroll = 0; }
+  if (ch === 'q') return closeLogs();
+  if (ch === 'w') lv.wrap = !lv.wrap;
+  if (ch === 'r') podLogsRestart(lv);
+  if (ch === 'c') { lv.pod = []; lv.scroll = 0; }
+  draw();
+}
+
 // ───────────────────────── ввод ─────────────────────────
 const KEYS = {
   '\x1b[A': 'up', '\x1b[B': 'down', '\x1b[C': 'right', '\x1b[D': 'left', '\x1b[H': 'home', '\x1b[F': 'end',
@@ -775,6 +963,7 @@ function onMouse(b, x, y, press) {
   if (b === 64 || b === 65) { // колесо
     const d = b === 64 ? 'up' : 'down';
     if (ui.mode === 'list') onKey({ k: d }); else if (ui.mode === 'picker') pickerKey({ k: d });
+    else if (ui.mode === 'logs' && ui.lv) { ui.lv.scroll = Math.max(0, ui.lv.scroll + (b === 64 ? 3 : -3)); draw(); }
     return;
   }
   if (b !== 0) return;
@@ -786,6 +975,7 @@ function onMouse(b, x, y, press) {
 function onKey(e) {
   if (ui.mode === 'form') return formKey(e);
   if (ui.mode === 'picker') return pickerKey(e);
+  if (ui.mode === 'logs') return logsKey(e);
   if (ui.mode === 'confirm') {
     const ch = e.k === 'char' ? (LAT[e.ch.toLowerCase()] || e.ch.toLowerCase()) : '';
     if (e.k === 'enter' || ch === 'y') return ui.confirm.yes();
@@ -846,6 +1036,7 @@ function onKey(e) {
     if (ch === 'e' && cur) return openServiceForm(cur);
     if (ch === 'd') return askDelete();
     if (ch === 'g') return saveRunningAsGroup();
+    if (ch === 'l') return openLogs();
     if (ch === 's') visible().forEach(start);
     if (ch === 'x') visible().forEach(stop);
   }
@@ -918,6 +1109,7 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   ↑ ↓ / колесо / клик   выбрать             Enter / Пробел / двойной клик   старт / стоп
   A  добавить           E  изменить         D / Del  удалить
   S  запустить все видимые                  X  остановить все видимые
+  L  логи пода на весь экран (как в Lens): прокрутка, фильтр, перенос, переподключение
   /  или Ctrl+F  поиск (имя, namespace, service, порт, статус); Esc — сбросить
   1 2 3 / Tab    вкладки: Все, Запущенные, Шаблоны
   G              сохранить запущенные сервисы как шаблон
