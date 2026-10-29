@@ -867,7 +867,7 @@ function enableConsoleMouse() {
 
 // ───────────────────────── запуск ─────────────────────────
 if (process.argv.includes('--version') || process.argv.includes('-v')) {
-  console.log(require('./package.json').version); process.exit(0);
+  console.log('bftport v' + require('./package.json').version); process.exit(0);
 }
 if (process.argv.includes('--update')) {
   const pkg = require('./package.json');
