@@ -1029,6 +1029,93 @@ function parseLogJson(text) {
     stack: stack === undefined ? '' : (typeof stack === 'string' ? stack : JSON.stringify(stack)),
   };
 }
+// ── третий вид «logback + JSON»: объекты и массивы внутри строки раскладываются с отступами.
+// Скобки ищем с учётом строк и экранирования, валидность проверяем JSON.parse, а отступы расставляем по исходному тексту:
+// так числа (в том числе очень большие), порядок ключей и содержимое строк не меняются.
+function matchBracket(t, i) {
+  const close = t[i] === '{' ? '}' : ']';
+  let depth = 0, inStr = false;
+  for (let j = i; j < t.length; j++) {
+    const c = t[j];
+    if (inStr) { if (c === '\\') j++; else if (c === '"') inStr = false; continue; }
+    if (c === '"') inStr = true;
+    else if (c === '{' || c === '[') depth++;
+    else if (c === '}' || c === ']') { depth--; if (depth === 0) return c === close ? j : -1; }
+  }
+  return -1;
+}
+function indentJson(src) {
+  const out = []; let line = '', depth = 0, inStr = false;
+  const nl = () => { out.push(line); line = '  '.repeat(depth); };
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (inStr) { line += c; if (c === '\\') line += src[++i] || ''; else if (c === '"') inStr = false; continue; }
+    if (c === '"') { inStr = true; line += c; }
+    else if (c === '{' || c === '[') {
+      let k = i + 1;
+      while (k < src.length && /\s/.test(src[k])) k++;
+      if (src[k] === (c === '{' ? '}' : ']')) { line += c + src[k]; i = k; } // пустые {} и [] остаются в одну строку
+      else { line += c; depth++; nl(); }
+    } else if (c === '}' || c === ']') { depth--; nl(); line += c; }
+    else if (c === ',') { line += c; nl(); }
+    else if (c === ':') line += ': ';
+    else if (/\s/.test(c)) continue;
+    else line += c;
+  }
+  out.push(line);
+  return out;
+}
+// Возвращает массив строк: текст до объекта и его начало — в первой, текст после объекта — в последней.
+function expandJson(text) {
+  if (text.length > 400000) return [text];
+  const out = []; let cur = '', i = 0, last = 0, tried = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if ((ch === '{' || ch === '[') && tried < 60) {
+      tried++;
+      const j = matchBracket(text, i);
+      if (j > i) {
+        const cand = text.slice(i, j + 1);
+        let obj;
+        try { obj = JSON.parse(cand); } catch (_) { obj = undefined; }
+        // мелочь вроде [1, 2, 3] или {} не трогаем; раскладываем вложенные или длинные объекты
+        if (obj !== null && typeof obj === 'object' && (Array.isArray(obj) ? obj.length : Object.keys(obj).length) && (cand.length > 60 || /[{\[]/.test(cand.slice(1, -1)))) {
+          const pretty = indentJson(cand);
+          if (pretty.length <= 500) {
+            cur += text.slice(last, i) + pretty[0];
+            for (let k = 1; k < pretty.length; k++) { out.push(cur); cur = pretty[k]; }
+            last = j + 1; i = j + 1; continue;
+          }
+        }
+      }
+    }
+    i++;
+  }
+  out.push(cur + text.slice(last));
+  return out;
+}
+function levelOf(t) {
+  if (/\b(ERROR|FATAL|PANIC|CRITICAL)\b|"level"\s*:\s*"(error|fatal|panic)"|\blevel=(error|fatal)\b/.test(t)) return 'ERROR';
+  if (/\b(WARN|WARNING)\b|"level"\s*:\s*"warn(ing)?"|\blevel=warn/.test(t)) return 'WARN';
+  if (/\b(DEBUG|TRACE)\b/.test(t)) return 'DEBUG';
+  return 'INFO';
+}
+// mode: 0 — как есть, 1 — logback, 2 — logback + JSON. null — строку не меняем.
+function formatEntries(text, mode) {
+  if (!mode) return null;
+  let parts = formatLog(text); // JSON-запись лога -> строки по шаблону logback
+  if (mode !== 2) return parts;
+  if (parts) { // раскладываем JSON в сообщении, строки стектрейса не трогаем
+    return parts.flatMap(pt => (pt.dim ? [pt] : expandJson(pt.text).map(t => ({ text: t, lvl: pt.lvl, dim: false }))));
+  }
+  const lines = expandJson(cleanLine(text));
+  if (lines.length < 2) return null; // JSON внутри нет — показываем как есть
+  const lvl = levelOf(text);
+  return lines.map(t => ({ text: t, lvl }));
+}
+const FMT_LABELS = ['Формат: как есть', 'Формат: logback', 'Формат: logback + JSON'];
+function cycleFmt(lv) { lv.fmt = (lv.fmt + 1) % 3; lv.fmtGen++; lv.scroll = 0; } // по кругу: как есть -> logback -> logback + JSON
+
 function formatLog(text) {
   const f = parseLogJson(text);
   if (!f) return null;
@@ -1425,7 +1512,7 @@ function openPodLogs(p) {
   ui.lv = { svc: s, src: 'pod', pod: [], scroll: 0, filter: '', searching: false, wrap: true, proc: null, timer: null, closed: false,
     gen: 0, retries: 0, endedAt: 0, msg: 'подключение…', selector: '', carryO: '', carryE: '',
     mode: 'one', podName: p.name, podInfo: { name: p.name, start: d ? d.start : '', phase: p.status, container: '', containers: d ? d.containers.length : 0 },
-    podCount: 1, fmt: true, fmtGen: 0, fmode: 'hl', curRef: null, regex: false, exp: null, note: '', noteUntil: 0, sel: null, drag: null, clk: null, container: '' };
+    podCount: 1, fmt: 1, fmtGen: 0, fmode: 'hl', curRef: null, regex: false, exp: null, note: '', noteUntil: 0, sel: null, drag: null, clk: null, container: '' };
   ui.mode = 'logs';
   podLogsStart(ui.lv); draw();
 }
@@ -1459,7 +1546,7 @@ function openLogs() {
   const s = curSvc(); if (!s) return;
   ui.lv = { svc: s, src: 'pod', pod: [], scroll: 0, filter: '', searching: false, wrap: true, proc: null, timer: null, closed: false,
     gen: 0, retries: 0, endedAt: 0, msg: 'подключение…', selector: '', carryO: '', carryE: '',
-    mode: null, podName: '', podInfo: null, podCount: 0, fmt: true, fmtGen: 0, fmode: 'hl', curRef: null, regex: false, exp: null, note: '', noteUntil: 0, sel: null, drag: null, clk: null }; // mode: null (ещё не выбрано) | 'one' | 'all'
+    mode: null, podName: '', podInfo: null, podCount: 0, fmt: 1, fmtGen: 0, fmode: 'hl', curRef: null, regex: false, exp: null, note: '', noteUntil: 0, sel: null, drag: null, clk: null }; // mode: null (ещё не выбрано) | 'one' | 'all'
   ui.mode = 'logs';
   podLogsStart(ui.lv); draw();
 }
@@ -1608,7 +1695,7 @@ async function choosePod(lv) {
 function viewOf(lv, e) {
   if (e.vg !== lv.fmtGen) {
     e.vg = lv.fmtGen;
-    e.view = (lv.fmt && !e.err && !e.sys && formatLog(e.text)) || [e];
+    e.view = (!e.err && !e.sys && formatEntries(e.text, lv.fmt)) || [e];
   }
   return e.view;
 }
@@ -1715,7 +1802,7 @@ function exportAll(lv, file) {
   const x = lv.exp = { file, lines: 0, proc: p, aborted: false, err: '', bad: false };
   let carry = '';
   const render = line => {
-    const parts = lv.fmt ? formatLog(line) : null;
+    const parts = formatEntries(line, lv.fmt);
     if (parts) { x.lines += parts.length; return parts.map(e => e.text).join('\n') + '\n'; }
     x.lines++; return cleanLine(line) + '\n';
   };
@@ -2005,7 +2092,7 @@ function renderLogs() {
     { key: '↑↓', label: lv.filter ? 'Совпадения' : 'Прокрутка', fn: () => {} },
     { key: 'End', label: 'К концу', fn: () => { lv.scroll = 0; draw(); } },
     { key: '/', label: 'Поиск', fn: () => { lv.searching = true; draw(); } },
-    { key: 'F', label: lv.fmt ? 'Формат: logback' : 'Формат: как есть', fn: () => { lv.fmt = !lv.fmt; lv.fmtGen++; lv.scroll = 0; draw(); } },
+    { key: 'F', label: FMT_LABELS[lv.fmt], fn: () => { cycleFmt(lv); draw(); } },
     ...(lv.src === 'pod' && lv.mode === 'one' ? [{ key: 'E', label: 'Экспорт', fn: () => lvExport(lv) }] : []),
     { key: 'W', label: lv.wrap ? 'Не переносить' : 'Переносить', fn: () => { lv.wrap = !lv.wrap; draw(); } },
     { key: 'P', label: s.kind === 'pod' ? 'Контейнер' : 'Сменить под', fn: () => choosePod(lv) },
@@ -2062,7 +2149,7 @@ function logsKey(e) {
   if (e.k === 'char' && e.ch === '2') { lv.src = 'pf'; lv.scroll = 0; }
   if (ch === 'q') return closeLogs();
   if (ch === 'w') lv.wrap = !lv.wrap;
-  if (ch === 'f') { lv.fmt = !lv.fmt; lv.fmtGen++; lv.scroll = 0; }
+  if (ch === 'f') cycleFmt(lv);
   if (ch === 'r') podLogsRestart(lv);
   if (ch === 'p') return choosePod(lv);
   if (ch === 'e') return lvExport(lv);
@@ -2289,7 +2376,7 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   L  логи пода на весь экран (как в Lens): один под — сразу, несколько — выбор
      со временем старта; в просмотре P — сменить под, / — поиск (как в IntelliJ: подсветка,
      счётчик, ↑↓/Enter/F3 — по совпадениям; Tab — режим «фильтр»), W — перенос,
-     F — формат: JSON-логи приводятся к шаблону logback (~/.m2/logback-local.xml),
+     F — формат по кругу: как есть → logback (~/.m2/logback-local.xml) → logback + JSON (объекты в сообщении раскладываются с отступами),
      Ctrl+R в поиске — регулярные выражения, E (в поиске Ctrl+S) — экспорт логов пода в файл (видимые / все)
      Мышь — выделение текста (двойной клик — слово, тройной — строка), Ctrl+C — копировать
   /  или Ctrl+F  поиск (имя, namespace, service, порт, статус); Esc — сбросить

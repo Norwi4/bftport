@@ -50,7 +50,7 @@ const PHRASES = [
   ['Выбрать', 'Select'], ['Отметить', 'Toggle'], ['Очистить', 'Clear'], ['Источник', 'Source'], ['К концу', 'To end'], ['Прокрутка', 'Scroll'],
   ['Совпадения', 'Matches'], ['Не переносить', 'No wrap'], ['Переносить', 'Wrap'], ['Перечитать', 'Reload'], ['Сменить под', 'Switch pod'],
   ['Контейнер пода ', 'Container of pod '], ['Контейнер', 'Container'], ['Логи пода', 'Pod logs'], ['Логи: ', 'Logs: '], ['Логи', 'Logs'],
-  ['Формат: logback', 'Format: logback'], ['Формат: как есть', 'Format: raw'], ['Проброс (избранное)', 'Forward (favorite)'],
+  ['Формат: logback + JSON', 'Format: logback + JSON'], ['Формат: logback', 'Format: logback'], ['Формат: как есть', 'Format: raw'], ['Проброс (избранное)', 'Forward (favorite)'],
   ['Проброс порта пода ', 'Forward pod port '], ['Проброс порта', 'Forward port'], ['Пробросить', 'Forward'],
   ['Напрямую к поду (выбрать порт)', 'Directly to pod (choose port)'], ['Напрямую к поду', 'Directly to pod'],
   ['Запустить набор', 'Start set'], ['Остановить набор', 'Stop set'], ['Ввести вручную', 'Enter manually'], ['Папка с конфигами', 'Config folder'],
@@ -191,7 +191,7 @@ KEYS (work on the Russian layout too; almost everything is clickable)
   L  pod logs full screen (like Lens): one pod — right away, several — a choice
      with start times; in the viewer P — switch pod, / — search (like IntelliJ: highlight,
      counter, ↑↓/Enter/F3 — through matches; Tab — «filter» mode), W — wrap,
-     F — format: JSON logs are rendered with the logback pattern (~/.m2/logback-local.xml),
+     F — format carousel: raw → logback (~/.m2/logback-local.xml) → logback + JSON (objects inside a message are indented),
      Ctrl+R in search — regular expressions, E (Ctrl+S in search) — export the pod's logs to a file (visible / all)
      Mouse — select text (double click — word, triple click — line), Ctrl+C — copy
   /  or Ctrl+F  search (name, namespace, service, port, status); Esc — clear
