@@ -93,7 +93,7 @@ function say(r, text, sys) {
 function portFree(port) {
   return new Promise(res => {
     const srv = net.createServer();
-    srv.once('error', () => res(false));
+    srv.once('error', e => res(e.code === 'EACCES')); // EACCES — порту нужны права root (разберётся sudo), а не «занят»
     srv.once('listening', () => srv.close(() => res(true)));
     srv.listen(port, '0.0.0.0');
   });
@@ -107,6 +107,39 @@ function start(s) {
   r.retries = 0;
   launch(s);
 }
+// На Linux порты ниже ip_unprivileged_port_start (обычно 1024) может занять только root. В этом случае kubectl запускается
+// через «sudo -S», а пароль спрашивается в программе: он хранится только в памяти процесса и нигде не записывается.
+function lowPortLimit() {
+  try { return parseInt(fs.readFileSync('/proc/sys/net/ipv4/ip_unprivileged_port_start', 'utf8'), 10) || 1024; } catch (_) { return 1024; }
+}
+const needsRoot = s => process.platform === 'linux' && typeof process.getuid === 'function' && process.getuid() !== 0 && Number(s.localPort) < lowPortLimit();
+function kspawnRoot(args, opts) {
+  assertReadOnly(args); // под sudo запускается только kubectl и только с проверенными аргументами
+  // env задаёт HOME и PATH пользователя, чтобы kubectl под root нашёл свои плагины авторизации и настройки
+  return spawn('sudo', ['-S', '-p', '', 'env', 'HOME=' + require('os').homedir(), 'PATH=' + (process.env.PATH || ''), 'kubectl', ...args], opts);
+}
+let sudoPw = null, sudoAsk = null;
+function sudoPassword(s) {
+  if (sudoPw !== null) return Promise.resolve(sudoPw);
+  if (sudoAsk) return sudoAsk; // несколько сервисов запускаются разом — спрашиваем один раз
+  sudoAsk = new Promise(resolve => {
+    const f = {
+      title: 'Пароль sudo', focus: 0, err: '',
+      fields: [{ key: 'pw', label: 'Пароль', value: '', secret: true }],
+      onCancel: () => resolve(null),
+    };
+    const ok = () => {
+      const pw = String(fval(f, 'pw'));
+      if (!pw) return fail(f, 'Введите пароль');
+      sudoPw = pw; closeForm(); resolve(pw);
+    };
+    f.buttons = [{ key: 'Enter', label: 'Продолжить', fn: ok }, { key: 'Esc', label: 'Отмена', fn: () => { f.onCancel(); closeForm(); } }];
+    f.submit = ok;
+    f.info = () => [`Сервис «${D(s.name)}», локальный порт ${s.localPort}`, 'Порт ниже 1024 на Linux доступен только root: для проброса нужен sudo.', 'Пароль хранится только в памяти до выхода из программы и никуда не записывается.'];
+    openForm(f);
+  }).finally(() => { sudoAsk = null; });
+  return sudoAsk;
+}
 async function launch(s) {
   const r = rt(s);
   r.status = 'starting'; r.info = '';
@@ -116,20 +149,36 @@ async function launch(s) {
     say(r, r.info, true); draw(); return;
   }
   if (!r.want) { r.status = 'stopped'; draw(); return; }
+  const root = needsRoot(s);
+  let pw = null;
+  if (root) {
+    pw = await sudoPassword(s);
+    if (pw === null) { r.status = 'error'; r.want = false; r.info = 'нужен пароль sudo'; say(r, r.info, true); draw(); return; }
+    if (!r.want) { r.status = 'stopped'; draw(); return; }
+  }
   const args = ['-n', s.namespace, 'port-forward', '--address', '0.0.0.0',
     `${s.kind === 'pod' ? 'pod' : 'service'}/${s.service}`, `${s.localPort}:${s.remotePort}`];
   const kc = kubeconfigOf(s);
   if (kc) args.push('--kubeconfig=' + kc);
-  say(r, '▶ kubectl ' + args.join(' '), true);
+  say(r, (root ? '▶ sudo kubectl ' : '▶ kubectl ') + args.join(' '), true);
   let p;
-  try { p = kspawn(args, { windowsHide: true }); }
+  try {
+    p = root ? kspawnRoot(args, { windowsHide: true }) : kspawn(args, { windowsHide: true });
+    if (root) { p.stdin.on('error', () => {}); p.stdin.end(pw + '\n'); }
+  }
   catch (e) { r.status = 'error'; r.info = e.message; r.want = false; draw(); return; }
   r.proc = p;
   const onData = d => {
     for (const line of d.toString().split(/\r?\n/)) {
       if (!line.trim()) continue;
       say(r, line);
-      if (/Forwarding from/.test(line)) {
+      if (root && /incorrect password|Sorry, try again|no password was provided|a password is required/i.test(line)) {
+        sudoPw = null; r.want = false; r.status = 'error'; r.info = 'неверный пароль sudo'; // при следующем запуске спросим снова
+        try { p.kill(); } catch (_) {}
+      } else if (root && /^sudo: /i.test(line)) { // прочие отказы sudo (нет tty, нет прав) повторять бессмысленно
+        r.want = false; r.status = 'error'; r.info = line.slice(0, 200);
+        try { p.kill(); } catch (_) {}
+      } else if (/Forwarding from/.test(line)) {
         r.status = 'running'; r.retries = 0; r.info = `0.0.0.0:${s.localPort} → ${s.remotePort}`;
       } else if (/^error|unable to|an error occurred|lost connection/i.test(line)) {
         r.info = line.slice(0, 200);
@@ -139,7 +188,7 @@ async function launch(s) {
   };
   p.stdout.on('data', onData);
   p.stderr.on('data', onData);
-  p.on('error', e => { r.info = e.code === 'ENOENT' ? 'kubectl не найден в PATH' : e.message; say(r, r.info, true); });
+  p.on('error', e => { r.info = e.code === 'ENOENT' ? (root ? 'sudo не найден в PATH' : 'kubectl не найден в PATH') : e.message; say(r, r.info, true); });
   p.on('exit', code => {
     r.proc = null;
     if (r.want) {
@@ -178,6 +227,7 @@ const isActive = s => { const r = rt(s); return r.want || !!r.proc; };
 function killAll() {
   for (const s of allSvcs()) { const r = rt(s); r.want = false; if (r.proc) try { r.proc.kill(); } catch (_) {} }
   if (ui.lv && ui.lv.proc) try { ui.lv.proc.kill(); } catch (_) {}
+  if (ui.lv && ui.lv.exp) try { ui.lv.exp.proc.kill(); } catch (_) {}
 }
 
 function kubeText(kc, args, timeout = 30000) {
@@ -629,8 +679,11 @@ function exit() {
 }
 
 // ───────────────────────── форма ─────────────────────────
-function openForm(f) { ui.form = f; ui.mode = 'form'; draw(); }
-function closeForm() { ui.form = null; ui.mode = 'list'; draw(); }
+function openForm(f) { f.back = ui.mode === 'form' ? ((ui.form && ui.form.back) || 'list') : ui.mode; ui.form = f; ui.mode = 'form'; draw(); }
+function closeForm() {
+  const b = (ui.form && ui.form.back) || 'list';
+  ui.form = null; ui.mode = b === 'logs' && !ui.lv ? 'list' : b; draw();
+}
 const fval = (f, k) => f.fields.find(x => x.key === k).value;
 const fset = (f, k, v) => { const fl = f.fields.find(x => x.key === k); fl.value = v; fl.pos = undefined; };
 
@@ -782,7 +835,10 @@ function renderForm() {
       const txt = String(fl.value), st = focus ? C.inputF : C.input;
       r.add(' ', st, focusFn);
       if (!txt && !focus && fl.hint) r.add(fl.hint.padEnd(boxW - 2).slice(0, boxW - 2), C.input + C.gray, focusFn);
-      else addInput(r, fl, 'value', 'pos', 'vs', boxW - 2, st, focus, focusFn);
+      else if (fl.secret) { // пароль: показываем только точки, значение остаётся в fl.value
+        const m = { v: '•'.repeat(txt.length), p: fl.pos, o: fl.vs };
+        addInput(r, m, 'v', 'p', 'o', boxW - 2, st, focus, focusFn); fl.vs = m.o;
+      } else addInput(r, fl, 'value', 'pos', 'vs', boxW - 2, st, focus, focusFn);
       r.add(' ', st, focusFn);
       if (focus && !txt && fl.hint) r.add(' ' + fl.hint, C.gray);
     }
@@ -802,7 +858,7 @@ function formKey(e) {
   const f = ui.form, fl = f.fields[f.focus];
   const n = f.fields.length;
   switch (e.k) {
-    case 'esc': return closeForm();
+    case 'esc': if (f.onCancel) f.onCancel(); return closeForm();
     case 'tab': case 'down': f.focus = (f.focus + 1) % n; break;
     case 'stab': case 'up': f.focus = (f.focus + n - 1) % n; break;
     case 'enter': return f.submit ? f.submit() : f.buttons[0].fn();
@@ -1370,7 +1426,7 @@ function openPodLogs(p) {
   ui.lv = { svc: s, src: 'pod', pod: [], scroll: 0, filter: '', searching: false, wrap: true, proc: null, timer: null, closed: false,
     gen: 0, retries: 0, endedAt: 0, msg: 'подключение…', selector: '', carryO: '', carryE: '',
     mode: 'one', podName: p.name, podInfo: { name: p.name, start: d ? d.start : '', phase: p.status, container: '', containers: d ? d.containers.length : 0 },
-    podCount: 1, fmt: true, fmtGen: 0, fmode: 'hl', curRef: null, container: '' };
+    podCount: 1, fmt: true, fmtGen: 0, fmode: 'hl', curRef: null, regex: false, exp: null, note: '', noteUntil: 0, container: '' };
   ui.mode = 'logs';
   podLogsStart(ui.lv); draw();
 }
@@ -1404,13 +1460,14 @@ function openLogs() {
   const s = curSvc(); if (!s) return;
   ui.lv = { svc: s, src: 'pod', pod: [], scroll: 0, filter: '', searching: false, wrap: true, proc: null, timer: null, closed: false,
     gen: 0, retries: 0, endedAt: 0, msg: 'подключение…', selector: '', carryO: '', carryE: '',
-    mode: null, podName: '', podInfo: null, podCount: 0, fmt: true, fmtGen: 0, fmode: 'hl', curRef: null }; // mode: null (ещё не выбрано) | 'one' | 'all'
+    mode: null, podName: '', podInfo: null, podCount: 0, fmt: true, fmtGen: 0, fmode: 'hl', curRef: null, regex: false, exp: null, note: '', noteUntil: 0 }; // mode: null (ещё не выбрано) | 'one' | 'all'
   ui.mode = 'logs';
   podLogsStart(ui.lv); draw();
 }
 function closeLogs() {
   const lv = ui.lv; if (!lv) return;
   lv.closed = true; clearTimeout(lv.timer);
+  if (lv.exp) { lv.exp.aborted = true; try { lv.exp.proc.kill(); } catch (_) {} } // недокачанный файл удалится сам
   if (lv.proc) { const p = lv.proc; lv.proc = null; try { p.kill(); } catch (_) {} }
   ui.lv = null; ui.mode = 'list'; draw();
 }
@@ -1556,10 +1613,132 @@ function viewOf(lv, e) {
   }
   return e.view;
 }
+// Запрос компилируется один раз на (текст, режим). Обычный текст экранируется, регулярное выражение берётся как есть.
+// Регистр не важен. Некорректное выражение не роняет программу, а даёт err для показа в строке поиска.
+const escapeRe = x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function lvCompile(lv) {
+  const key = (lv.regex ? 'r:' : 't:') + lv.filter;
+  if (lv._c && lv._c.key === key) return lv._c;
+  let re = null, err = '';
+  if (lv.filter) {
+    try { re = new RegExp(lv.regex ? lv.filter : escapeRe(lv.filter), 'gi'); }
+    catch (e) { err = String(e.message).replace(/^Invalid regular expression: /, '').replace(/^\/.*\/[a-z]*: /, '').slice(0, 70); }
+  }
+  return (lv._c = { key, re, err });
+}
 function lvSource(lv) {
   const src = lv.src === 'pod' ? lv.pod.flatMap(e => viewOf(lv, e)) : rt(lv.svc).log.map(l => ({ text: l.t + ' ' + l.text, sys: l.sys }));
-  const q = lv.filter.toLowerCase();
-  return q && lv.fmode === 'filter' ? src.filter(l => l.text.toLowerCase().includes(q)) : src;
+  if (lv.filter && lv.fmode === 'filter') {
+    const { re } = lvCompile(lv);
+    if (re) return src.filter(l => { re.lastIndex = 0; return re.test(l.text); });
+  }
+  return src;
+}
+
+// ── экспорт: «видимые» (то, что загружено в окно просмотра, с учётом формата и фильтра) или «все логи пода» (весь kubectl logs)
+function lvNote(lv, text, bad) {
+  lv.note = text; lv.noteBad = !!bad; lv.noteUntil = Date.now() + 12000;
+  draw(); setTimeout(draw, 12100);
+}
+const shortPath = f => { const h = path.resolve(require('os').homedir()); return f.startsWith(h) ? '~' + f.slice(h.length) : f; };
+// Строки, попавшие в окно просмотра (целиком, даже если на экране видна только часть перенесённой строки).
+function lvVisibleLines(lv) {
+  const L = lvLayout(lv);
+  const maxTop = Math.max(0, L.total - L.n);
+  const top = Math.max(0, maxTop - Math.max(0, Math.min(lv.scroll, maxTop))), bottom = top + L.n - 1;
+  const res = [];
+  for (let i = 0; i < L.lines.length; i++) {
+    const rows = lv.wrap ? Math.max(1, Math.ceil(L.lines[i].text.length / L.width)) : 1;
+    if (L.rowStart[i] + rows - 1 < top || L.rowStart[i] > bottom) continue;
+    if (!L.lines[i].sys && !L.lines[i].err) res.push(L.lines[i].text);
+  }
+  return res;
+}
+function lvExport(lv) {
+  if (lv.src !== 'pod') return lvNote(lv, 'экспорт доступен только на вкладке «Под»', true);
+  if (lv.mode !== 'one') return lvNote(lv, 'экспорт доступен для логов конкретного пода (P — выбрать под)', true);
+  if (lv.exp) return lvNote(lv, 'экспорт уже идёт', true);
+  chooseExport(lv);
+}
+async function chooseExport(lv) {
+  const snap = lvVisibleLines(lv); // что видно на экране прямо сейчас (пока открыт диалог, окно уже занято)
+  const kind = await pick('Экспорт логов пода', [
+    { label: `Видимые: на экране (${snap.length} строк${lv.filter && lv.fmode === 'filter' ? ', с фильтром' : ''})`, value: 'visible' },
+    { label: 'Все логи пода (запрос к кластеру, может быть большим)', value: 'all' },
+  ]);
+  if (!kind || lv.closed) return;
+  openExportForm(lv, kind, snap);
+}
+function defaultExportPath(lv, kind) {
+  const d = new Date(), z = x => String(x).padStart(2, '0');
+  const stamp = `${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}-${z(d.getHours())}${z(d.getMinutes())}${z(d.getSeconds())}`;
+  return path.join(require('os').homedir(), 'bftport-logs', `${(lv.podName || 'pod').replace(/[^\w.-]/g, '_')}_${stamp}${kind === 'all' ? '_all' : ''}.log`);
+}
+function openExportForm(lv, kind, snap) {
+  const f = {
+    title: kind === 'all' ? 'Экспорт: все логи пода' : 'Экспорт: видимые логи', focus: 0, err: '',
+    fields: [{ key: 'path', label: 'Путь к файлу', value: defaultExportPath(lv, kind) }],
+    buttons: [
+      { key: 'Enter', label: 'Сохранить', fn: () => submitExport(f, lv, kind, snap) },
+      { key: 'Esc', label: 'Отмена', fn: closeForm },
+    ],
+    submit: () => submitExport(f, lv, kind, snap),
+  };
+  f.info = () => (kind === 'all' ? 'Файл будет получен запросом ко всему логу пода (kubectl logs без ограничения)' : 'Строк в файле: ' + snap.length);
+  openForm(f);
+}
+function submitExport(f, lv, kind, snap) {
+  const typed = String(fval(f, 'path')).trim().replace(/^"|"$/g, '');
+  if (!typed) return fail(f, 'Укажите путь к файлу');
+  const file = path.resolve(expandHome(typed));
+  if (fs.existsSync(file)) return fail(f, 'Файл уже существует — укажите другое имя'); // существующие файлы не перезаписываем
+  try { fs.mkdirSync(path.dirname(file), { recursive: true }); } catch (e) { return fail(f, 'не удалось создать папку: ' + e.message); }
+  if (kind === 'visible') {
+    const lines = snap;
+    closeForm();
+    if (!lines.length) return lvNote(lv, 'нет строк для экспорта', true);
+    try { fs.writeFileSync(file, lines.join('\n') + '\n', { encoding: 'utf8', flag: 'wx' }); }
+    catch (e) { return lvNote(lv, 'экспорт не удался: ' + e.message, true); }
+    return lvNote(lv, `⇩ сохранено: ${shortPath(file)} (${lines.length} строк)`);
+  }
+  closeForm();
+  exportAll(lv, file);
+}
+// Весь лог пода пишется потоком прямо в файл (не копится в памяти), в том же формате, что и в окне.
+function exportAll(lv, file) {
+  const s = lv.svc, kc = kubeconfigOf(s), cont = lv.container || (lv.podInfo && lv.podInfo.container);
+  const args = ['-n', s.namespace, 'logs', lv.podName];
+  if (cont) args.push('-c', cont);
+  if (kc) args.push('--kubeconfig=' + kc);
+  let p, out;
+  try { p = kspawn(args, { windowsHide: true }); out = fs.createWriteStream(file, { flags: 'wx', encoding: 'utf8' }); }
+  catch (e) { if (p) try { p.kill(); } catch (_) {} return lvNote(lv, 'экспорт не удался: ' + e.message, true); }
+  const x = lv.exp = { file, lines: 0, proc: p, aborted: false, err: '', bad: false };
+  let carry = '';
+  const render = line => {
+    const parts = lv.fmt ? formatLog(line) : null;
+    if (parts) { x.lines += parts.length; return parts.map(e => e.text).join('\n') + '\n'; }
+    x.lines++; return cleanLine(line) + '\n';
+  };
+  out.on('error', e => { x.bad = true; x.err = e.message; try { p.kill(); } catch (_) {} });
+  p.stdout.setEncoding('utf8'); p.stderr.setEncoding('utf8');
+  p.stdout.on('data', d => {
+    const parts = (carry + d).split(/\r?\n/); carry = parts.pop();
+    if (parts.length && !out.write(parts.map(render).join(''))) { p.stdout.pause(); out.once('drain', () => p.stdout.resume()); }
+    draw();
+  });
+  p.stderr.on('data', d => { x.err += d; });
+  p.on('error', e => { x.bad = true; x.err = e.code === 'ENOENT' ? 'kubectl не найден в PATH' : e.message; });
+  p.on('exit', code => {
+    if (carry) out.write(render(carry));
+    out.end(() => {
+      lv.exp = null;
+      if (x.aborted) { try { fs.unlinkSync(file); } catch (_) {} return; }
+      if (code === 0 && !x.bad) return lvNote(lv, `⇩ сохранено: ${shortPath(file)} (${x.lines} строк)`);
+      try { fs.unlinkSync(file); } catch (_) {}
+      lvNote(lv, 'экспорт не удался: ' + (x.err.trim().split('\n')[0] || 'код ' + code), true);
+    });
+  });
 }
 
 // ── поиск как в IntelliJ: подсветка всех совпадений, текущее ярче, счётчик, переходы, прокрутка «по центру»
@@ -1574,15 +1753,15 @@ function lvLayout(lv) {
 // все вхождения запроса: occ[i] — диапазоны в строке i, list — плоский список для навигации
 function lvFind(lv, lines) {
   const occ = new Array(lines.length).fill(null), list = [];
-  if (!lv.filter) return { occ, list };
-  const re = new RegExp(lv.filter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+  const { re } = lvCompile(lv);
+  if (!re) return { occ, list };
   for (let i = 0; i < lines.length; i++) {
     const t = lines[i].text; let m, k = 0, arr = null;
     re.lastIndex = 0;
     while ((m = re.exec(t))) {
+      if (m[0].length === 0) { re.lastIndex++; continue; } // пустые совпадения (например, у a*) не подсвечиваем
       (arr || (arr = [])).push([m.index, m.index + m[0].length]);
       list.push({ i, k, s: m.index }); k++;
-      if (m[0].length === 0) re.lastIndex++;
     }
     occ[i] = arr;
   }
@@ -1683,10 +1862,15 @@ function renderLogs() {
     tb.add(' ⌕ ', fs_, () => { lv.searching = true; draw(); });
     addInput(tb, lv, 'filter', 'fpos', 'foff', Math.max(10, Math.min(40, W - tb.x - 24)), fs_, lv.searching, () => { lv.searching = true; draw(); });
     tb.add(' ', fs_);
-    if (F) tb.add(F.list.length ? ` ${ci >= 0 ? ci + 1 : '–'}/${F.list.length} ` : ' нет совпадений ', F.list.length ? C.green : C.red);
+    const cp = lvCompile(lv);
+    if (cp.err) tb.add(' ⚠ некорректное выражение: ' + cp.err + ' ', C.red);
+    else if (F) tb.add(F.list.length ? ` ${ci >= 0 ? ci + 1 : '–'}/${F.list.length} ` : ' нет совпадений ', F.list.length ? C.green : C.red);
+    tb.add(' .* ', lv.regex ? C.key : C.btn, () => { lv.regex = !lv.regex; lvQueryChanged(lv); draw(); });
     tb.add(lv.fmode === 'filter' ? ' фильтр (Tab) ' : ' подсветка (Tab) ', C.dim);
   }
-  if (lv.src === 'pod') tb.add(' ' + lv.msg, lv.proc ? C.gray : C.yellow);
+  if (lv.exp) tb.add(` ⇩ экспорт: ${lv.exp.lines} строк… `, C.yellow);
+  if (Date.now() < lv.noteUntil) tb.add(' ' + lv.note, lv.noteBad ? C.red : C.green);
+  else if (lv.src === 'pod') tb.add(' ' + lv.msg, lv.proc ? C.gray : C.yellow);
   tb.fill(); rows.push(tb);
 
   // собираем n нижних экранных строк с учётом прокрутки и переноса
@@ -1719,6 +1903,7 @@ function renderLogs() {
     { key: 'End', label: 'К концу', fn: () => { lv.scroll = 0; draw(); } },
     { key: '/', label: 'Поиск', fn: () => { lv.searching = true; draw(); } },
     { key: 'F', label: lv.fmt ? 'Формат: logback' : 'Формат: как есть', fn: () => { lv.fmt = !lv.fmt; lv.fmtGen++; lv.scroll = 0; draw(); } },
+    ...(lv.src === 'pod' && lv.mode === 'one' ? [{ key: 'E', label: 'Экспорт', fn: () => lvExport(lv) }] : []),
     { key: 'W', label: lv.wrap ? 'Не переносить' : 'Переносить', fn: () => { lv.wrap = !lv.wrap; draw(); } },
     { key: 'P', label: s.kind === 'pod' ? 'Контейнер' : 'Сменить под', fn: () => choosePod(lv) },
     { key: 'R', label: 'Перечитать', fn: () => { podLogsRestart(lv); draw(); } },
@@ -1728,7 +1913,7 @@ function renderLogs() {
   ];
   const br = buttonRows(H - 2, btns);
   for (const r of br) { r.fill(); rows.push(r); }
-  if (br.length < 2) rows.push(new Row(H - 1).add(' колесо / PgUp / PgDn / Home / End — прокрутка · в поиске: ↑↓ Enter F3 — совпадения, Tab — подсветка/фильтр, Esc — закрыть', C.gray).fill());
+  if (br.length < 2) rows.push(new Row(H - 1).add(' колесо / PgUp / PgDn / Home / End — прокрутка · E — экспорт · в поиске: ↑↓ Enter F3 — совпадения, Tab — подсветка/фильтр, Ctrl+R — regex, Ctrl+S — экспорт, Esc — закрыть', C.gray).fill());
   return rows;
 }
 function logsKey(e) {
@@ -1742,6 +1927,8 @@ function logsKey(e) {
       case 'pgup': lv.scroll += n - 1; return draw();
       case 'pgdn': lv.scroll = Math.max(0, lv.scroll - (n - 1)); return draw();
       case 'tab': lv.fmode = lv.fmode === 'hl' ? 'filter' : 'hl'; lvKeep(lv); return draw();
+      case 'ctrl-r': lv.regex = !lv.regex; lvQueryChanged(lv); return draw();
+      case 'ctrl-s': lvExport(lv); return draw();
       case 'ctrl-c': return closeLogs();
       case 'bs': if (!lv.filter) { lv.searching = false; return draw(); } // иначе — обычное стирание
       // fallthrough
@@ -1773,6 +1960,7 @@ function logsKey(e) {
   if (ch === 'f') { lv.fmt = !lv.fmt; lv.fmtGen++; lv.scroll = 0; }
   if (ch === 'r') podLogsRestart(lv);
   if (ch === 'p') return choosePod(lv);
+  if (ch === 'e') return lvExport(lv);
   if (ch === 'c') { lv.pod = []; lv.curRef = null; lv.scroll = 0; }
   draw();
 }
@@ -1818,6 +2006,8 @@ function onTokens(str) {
     else if (t === '\x03') e = { k: 'ctrl-c' };
     else if (t === '\x15') e = { k: 'ctrl-u' };
     else if (t === '\x17') e = { k: 'ctrl-w' };
+    else if (t === '\x12') e = { k: 'ctrl-r' };
+    else if (t === '\x13') e = { k: 'ctrl-s' };
     else if (t === '\x16') e = { k: 'ctrl-v' };
     else if (t === '\x01') e = { k: 'home' };
     else if (t === '\x05') e = { k: 'end' };
@@ -1993,7 +2183,8 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   L  логи пода на весь экран (как в Lens): один под — сразу, несколько — выбор
      со временем старта; в просмотре P — сменить под, / — поиск (как в IntelliJ: подсветка,
      счётчик, ↑↓/Enter/F3 — по совпадениям; Tab — режим «фильтр»), W — перенос,
-     F — формат: JSON-логи приводятся к шаблону logback (~/.m2/logback-local.xml)
+     F — формат: JSON-логи приводятся к шаблону logback (~/.m2/logback-local.xml),
+     Ctrl+R в поиске — регулярные выражения, E (в поиске Ctrl+S) — экспорт логов пода в файл (видимые / все)
   /  или Ctrl+F  поиск (имя, namespace, service, порт, статус); Esc — сбросить
   Во всех полях ввода: ←→ Home End Del — курсор, Ctrl+←/→ — по словам, Ctrl+W — слово назад,
   Ctrl+U — очистить, Ctrl+V / Shift+Insert — вставить из буфера обмена
@@ -2014,6 +2205,7 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
 ПРО ПРОБРОС
   Упавший проброс (например при рестарте пода) перезапускается сам.
   Если локальный порт занят, сервис покажет ошибку и не запустится.
+  На Linux порт ниже 1024 (например 80) пробрасывается через sudo: программа спросит пароль.
 
 ФАЙЛЫ
   Установлен в: ${__dirname}

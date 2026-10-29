@@ -111,8 +111,25 @@ const PHRASES = [
   ['у сервиса один под, выбирать не из чего', 'the service has a single pod, nothing to choose'], ['в поде один контейнер', 'the pod has a single container'],
   ['↻ под заменён: ', '↻ pod replaced: '], ['под недоступен (возможно, удалён) · ', 'pod unavailable (possibly deleted) · '],
   [' — повтор…', ' — retrying…'],
-  [' колесо / PgUp / PgDn / Home / End — прокрутка · в поиске: ↑↓ Enter F3 — совпадения, Tab — подсветка/фильтр, Esc — закрыть',
-    ' wheel / PgUp / PgDn / Home / End — scroll · in search: ↑↓ Enter F3 — matches, Tab — highlight/filter, Esc — close'],
+  [' колесо / PgUp / PgDn / Home / End — прокрутка · E — экспорт · в поиске: ↑↓ Enter F3 — совпадения, Tab — подсветка/фильтр, Ctrl+R — regex, Ctrl+S — экспорт, Esc — закрыть',
+    ' wheel / PgUp / PgDn / Home / End — scroll · E — export · in search: ↑↓ Enter F3 — matches, Tab — highlight/filter, Ctrl+R — regex, Ctrl+S — export, Esc — close'],
+  ['некорректное выражение: ', 'invalid expression: '],
+  ['Экспорт логов пода', 'Export pod logs'], ['Экспорт: все логи пода', 'Export: all pod logs'], ['Экспорт: видимые логи', 'Export: visible logs'], ['Экспорт', 'Export'],
+  ['Видимые: на экране (', 'Visible: on screen ('], [', с фильтром', ', filtered'],
+  ['Все логи пода (запрос к кластеру, может быть большим)', 'All pod logs (queried from the cluster, may be large)'],
+  ['Путь к файлу', 'File path'], ['Укажите путь к файлу', 'Enter a file path'],
+  ['Файл уже существует — укажите другое имя', 'The file already exists — choose another name'], ['не удалось создать папку: ', 'could not create the folder: '],
+  ['Файл будет получен запросом ко всему логу пода (kubectl logs без ограничения)', 'The file is fetched by requesting the whole pod log (kubectl logs without a limit)'],
+  ['Строк в файле: ', 'Lines in file: '], ['⇩ экспорт: ', '⇩ export: '], ['⇩ сохранено: ', '⇩ saved: '], ['экспорт не удался: ', 'export failed: '],
+  ['нет строк для экспорта', 'no lines to export'], ['экспорт доступен только на вкладке «Под»', 'export is available only on the «Pod» tab'],
+  ['экспорт доступен для логов конкретного пода (P — выбрать под)', "export is available for a specific pod's logs (P — choose a pod)"],
+  ['экспорт уже идёт', 'an export is already running'],
+  ['код ', 'code '],
+  ['Пароль sudo', 'sudo password'], ['Пароль', 'Password'], ['Продолжить', 'Continue'], ['Введите пароль', 'Enter the password'],
+  ['Сервис «', 'Service «'], ['», локальный порт ', '», local port '],
+  ['Порт ниже 1024 на Linux доступен только root: для проброса нужен sudo.', 'On Linux ports below 1024 can be bound only by root: forwarding needs sudo.'],
+  ['Пароль хранится только в памяти до выхода из программы и никуда не записывается.', 'The password is kept in memory until you exit and is never written anywhere.'],
+  ['нужен пароль sudo', 'sudo password required'], ['неверный пароль sudo', 'wrong sudo password'], ['sudo не найден в PATH', 'sudo not found in PATH'],
   // системные сообщения
   ['операция запрещена (только просмотр): kubectl ', 'operation not allowed (read-only): kubectl '], ['пустая команда kubectl', 'empty kubectl command'],
   ['kubectl не найден в PATH', 'kubectl not found in PATH'],
@@ -172,7 +189,8 @@ KEYS (work on the Russian layout too; almost everything is clickable)
   L  pod logs full screen (like Lens): one pod — right away, several — a choice
      with start times; in the viewer P — switch pod, / — search (like IntelliJ: highlight,
      counter, ↑↓/Enter/F3 — through matches; Tab — «filter» mode), W — wrap,
-     F — format: JSON logs are rendered with the logback pattern (~/.m2/logback-local.xml)
+     F — format: JSON logs are rendered with the logback pattern (~/.m2/logback-local.xml),
+     Ctrl+R in search — regular expressions, E (Ctrl+S in search) — export the pod's logs to a file (visible / all)
   /  or Ctrl+F  search (name, namespace, service, port, status); Esc — clear
   In all input fields: ←→ Home End Del — cursor, Ctrl+←/→ — by words, Ctrl+W — delete word,
   Ctrl+U — clear, Ctrl+V / Shift+Insert — paste from the clipboard
@@ -194,6 +212,7 @@ TEMPLATES
 ABOUT FORWARDS
   A dropped forward (for example when a pod restarts) is restarted automatically.
   If the local port is busy, the service shows an error and does not start.
+  On Linux a port below 1024 (for example 80) is forwarded through sudo: the app asks for the password.
 
 FILES
   Installed in: ${dir}
