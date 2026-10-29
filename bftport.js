@@ -20,6 +20,23 @@ const VERSION = require('./package.json').version;
 // ───────────────────────── база ─────────────────────────
 let db = loadDb();
 
+// ── язык интерфейса: из настроек, а если не выбран — по языку системы
+const i18n = require('./i18n');
+let UILANG = db.lang === 'ru' || db.lang === 'en' ? db.lang : (/^ru/i.test(Intl.DateTimeFormat().resolvedOptions().locale) ? 'ru' : 'en');
+// Перевод на лету: тексты в коде русские, при English переводятся в момент вывода (поэтому язык меняется без перезапуска).
+// Если перевод длиннее/короче исходного, хвост из пробелов подгоняется, чтобы колонки не ехали.
+function trKeep(text) {
+  const out = i18n.translate(text), pad = i18n.strip(text).length - out.length;
+  if (pad === 0 || !/\s$/.test(text)) return out;
+  if (pad > 0) return out + ' '.repeat(pad);
+  let o = out, extra = -pad;
+  while (extra > 0 && / {2}$/.test(o)) { o = o.slice(0, -1); extra--; }
+  return o;
+}
+const D = i18n.D;
+const tr = text => (UILANG === 'en' ? i18n.translate(text) : i18n.strip(text));
+if (UILANG === 'en') for (const m of ['log', 'error']) { const o = console[m].bind(console); console[m] = (...a) => o(...a.map(x => (typeof x === 'string' ? i18n.translate(x) : x))); }
+
 function loadDb() {
   try {
     const d = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
@@ -197,7 +214,7 @@ const ui = {
 };
 let W = 80, H = 24, hits = [];
 
-const LAT = { 'й': 'q', 'ф': 'a', 'у': 'e', 'в': 'd', 'ы': 's', 'ч': 'x', 'л': 'k', 'н': 'y', 'т': 'n', 'ш': 'i', 'п': 'g', 'д': 'l', 'ц': 'w', 'к': 'r', 'с': 'c', 'з': 'p', 'а': 'f' };
+const LAT = { 'й': 'q', 'ф': 'a', 'у': 'e', 'в': 'd', 'ы': 's', 'ч': 'x', 'л': 'k', 'н': 'y', 'т': 'n', 'ш': 'i', 'п': 'g', 'д': 'l', 'щ': 'o', 'ц': 'w', 'к': 'r', 'с': 'c', 'з': 'p', 'а': 'f' };
 
 // стили
 const RS = '\x1b[0m';
@@ -254,9 +271,9 @@ function addInput(row, o, vk, pk, ok, width, style, active, fn) {
   off = Math.max(0, Math.min(off, Math.max(0, v.length - width + 1)));
   o[ok] = off;
   const view = v.slice(off, off + width), cp = pos - off;
-  if (!active) { row.add(view.padEnd(width), style, fn); return; }
+  if (!active) { row.add(view.padEnd(width), style, fn, true); return; }
   const at = view[cp] === undefined ? ' ' : view[cp];
-  row.add(view.slice(0, cp), style, fn).add(at, style + '\x1b[7m', fn).add(view.slice(cp + 1).padEnd(Math.max(0, width - cp - 1)), style, fn);
+  row.add(view.slice(0, cp), style, fn, true).add(at, style + '\x1b[7m', fn, true).add(view.slice(cp + 1).padEnd(Math.max(0, width - cp - 1)), style, fn, true);
 }
 const cleanPaste = t => String(t).replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '').replace(/\r\n|\r|\n|\t/g, ' ').replace(/[\x00-\x1f\x7f]/g, '').trim();
 // запасной путь для терминалов, которые передают Ctrl+V как символ, а не вставляют сами
@@ -273,8 +290,10 @@ function readClipboard(cb) {
 
 class Row {
   constructor(y) { this.y = y; this.x = 0; this.out = ''; }
-  add(text, style = '', fn) {
+  add(text, style = '', fn, raw = false) {
     text = String(text);
+    if (!raw && UILANG === 'en' && (i18n.HAS_CYR.test(text) || text.includes('\u2060'))) text = trKeep(text);
+    else text = i18n.strip(text);
     if (this.x >= W) return this;
     if (this.x + text.length > W) text = text.slice(0, W - this.x);
     if (fn) hits.push({ y: this.y, x1: this.x, x2: this.x + text.length - 1, fn });
@@ -310,9 +329,9 @@ function buttonRows(y, buttons) {
   const rows = [new Row(y)];
   for (const b of buttons) {
     let r = rows[rows.length - 1];
-    const w = b.key.length + b.label.length + 4;
+    const w = b.key.length + tr(b.label).length + 4;
     if (r.x + w > W && r.x > 0) { r = new Row(y + rows.length); rows.push(r); }
-    r.add(' ' + b.key + ' ', C.key, b.fn).add(' ' + b.label + ' ', C.btn, b.fn).add(' ');
+    r.add(' ' + b.key + ' ', C.key, b.fn).add(' ' + tr(b.label) + ' ', C.btn, b.fn).add(' ');
   }
   return rows;
 }
@@ -322,7 +341,7 @@ function matchKind(s) {
   const terms = ui.query.toLowerCase().split(/\s+/).filter(Boolean);
   if (!terms.length) return 'meta';
   const r = rt(s);
-  const meta = [s.name, s.namespace, s.service, s.localPort, s.remotePort, s.kubeconfig, STATUS[r.status][2], r.info].join(' ').toLowerCase();
+  const meta = [s.name, s.namespace, s.service, s.localPort, s.remotePort, s.kubeconfig, STATUS[r.status][2], i18n.translate(STATUS[r.status][2]), r.info].join(' ').toLowerCase();
   return terms.every(t => meta.includes(t)) ? 'meta' : null;
 }
 function visible() {
@@ -360,7 +379,7 @@ function onGroupClick(idx) {
 function askDeleteGroup() {
   const g = curGroup(); if (!g) return;
   ui.mode = 'confirm';
-  ui.confirm = { msg: `Удалить шаблон «${g.name}»? (сервисы останутся)`, yes: () => { db.groups.splice(db.groups.indexOf(g), 1); saveDb(); closeConfirm(); } };
+  ui.confirm = { msg: `Удалить шаблон «${D(g.name)}»? (сервисы останутся)`, yes: () => { db.groups.splice(db.groups.indexOf(g), 1); saveDb(); closeConfirm(); } };
   draw();
 }
 
@@ -368,7 +387,7 @@ function renderGroups(rows) {
   const gs = groupsVisible();
   const nameW = Math.max(12, Math.min(26, Math.floor(W * 0.22)));
   const h = new Row(2);
-  h.add(' ', C.head).add('  ' + trunc('ШАБЛОН', nameW) + ' ', C.head).add(trunc('СТАТУС', 16) + ' ', C.head).add('СОСТАВ', C.head).fill(C.head);
+  h.add(' ', C.head).add('  ' + trunc(tr('ШАБЛОН'), nameW) + ' ', C.head).add(trunc(tr('СТАТУС'), 16) + ' ', C.head).add(tr('СОСТАВ'), C.head).fill(C.head);
   rows.push(h);
   const logH = Math.max(3, Math.min(10, Math.floor(H * 0.3)));
   const listH = Math.max(3, H - 6 - logH);
@@ -388,17 +407,17 @@ function renderGroups(rows) {
     const st = groupStat(g);
     const [icon, col] = !st.m.length ? ['○', C.gray] : st.err ? ['✖', C.red] : st.run === st.m.length ? ['●', C.green] : st.act ? ['◐', C.yellow] : ['○', C.gray];
     row.add(idx === ui.gsel ? '▌' : ' ', C.yellow + bg, click).add(' ' + icon + ' ', col + bg, click)
-      .add(trunc(g.name, nameW) + ' ', C.bold + bg, click)
+      .add(trunc(g.name, nameW) + ' ', C.bold + bg, click, true)
       .add(trunc(`${st.run}/${st.m.length} работает`, 16) + ' ', col + bg, click)
-      .add(trunc(st.m.map(s => s.name).join(', '), W - row.x), C.dim + bg, click);
+      .add(trunc(st.m.map(s => s.name).join(', '), W - row.x), C.dim + bg, click, true);
     row.fill(bg); rows.push(row);
   }
   const cur = gs[ui.gsel];
-  rows.push(new Row(3 + listH).add(' Состав' + (cur ? ': ' + cur.name : '') + ' ', C.head).fill(C.head));
+  rows.push(new Row(3 + listH).add(' Состав' + (cur ? ': ' + D(cur.name) : '') + ' ', C.head).fill(C.head));
   const ms = cur ? members(cur) : [];
   for (let i = 0; i < logH; i++) {
     const row = new Row(4 + listH + i), s = ms[i];
-    if (s) { const st = STATUS[rt(s).status]; row.add(' ' + st[0] + ' ', st[1]).add(trunc(s.name, 28) + ' ').add(trunc(`${s.namespace}/${s.service}`, 38) + ' ', C.dim).add(`:${s.localPort}  ${st[2]}`, C.gray); }
+    if (s) { const st = STATUS[rt(s).status]; row.add(' ' + st[0] + ' ', st[1]).add(trunc(s.name, 28) + ' ', '', undefined, true).add(trunc(`${s.namespace}/${s.service}`, 38) + ' ', C.dim, undefined, true).add(`:${s.localPort}  ${st[2]}`, C.gray); }
     row.fill(); rows.push(row);
   }
   const st = cur ? groupStat(cur) : null;
@@ -409,6 +428,7 @@ function renderGroups(rows) {
     { key: 'E', label: 'Изменить', fn: () => cur && openGroupForm(cur) },
     { key: 'D', label: 'Удалить', fn: () => askDeleteGroup() },
     { key: '/', label: 'Поиск', fn: () => { ui.searching = true; draw(); } },
+    { key: 'O', label: 'Настройки', fn: () => openSettings() },
     { key: 'K', label: 'Конфиг', fn: () => switchKubeconfig() },
     { key: 'Q', label: 'Выход', fn: () => quit() },
   ];
@@ -420,7 +440,7 @@ function renderGroups(rows) {
 function saveRunningAsGroup() { openGroupForm(null, db.services.filter(isActive).map(s => s.id)); }
 function openGroupForm(g, preset) {
   const f = {
-    title: g ? `Шаблон: ${g.name}` : 'Новый шаблон', focus: 0, err: '',
+    title: g ? `Шаблон: ${D(g.name)}` : 'Новый шаблон', focus: 0, err: '',
     chosen: new Set(g ? g.services : (preset || [])),
     fields: [{ key: 'name', label: 'Название', value: g ? g.name : '' }],
     buttons: [
@@ -463,13 +483,13 @@ function renderList() {
   t.add(` ⇄ Port Forwards v${VERSION} `, C.title).add(` ${db.services.length} сервисов · ${running} работает `, C.title);
   const kc = db.kubeconfig ? '⎈ ' + path.basename(db.kubeconfig) + ' ▾' : 'kubeconfig не выбран (K)';
   const right = ` ${kc} `;
-  const fl_ = Date.now() < ui.flashUntil ? ' ⚠ ' + ui.flash + ' ' : '';
+  const fl_ = Date.now() < ui.flashUntil ? tr(' ⚠ ' + ui.flash + ' ') : '';
   if (fl_ && W - t.x > right.length + 4) t.add(fl_.slice(0, W - t.x - right.length - 1), '\x1b[1;93;48;5;25m');
   if (W - t.x > right.length) t.add(' '.repeat(W - t.x - right.length), C.title).add(right, C.title, () => switchKubeconfig());
   t.fill(C.title); rows.push(t);
 
   const tb = new Row(1);
-  const tab = (id, label) => tb.add(` ${label} `, ui.tab === id ? C.key : C.btn, () => { ui.tab = id; ui.sel = 0; ui.off = 0; ui.gsel = 0; ui.goff = 0; ui.psel = 0; ui.poff = 0; ui.pkey = ''; if (id === 'cluster') refreshPods(); draw(); }).add(' ');
+  const tab = (id, label) => tb.add(` ${tr(label)} `, ui.tab === id ? C.key : C.btn, () => { ui.tab = id; ui.sel = 0; ui.off = 0; ui.gsel = 0; ui.goff = 0; ui.psel = 0; ui.poff = 0; ui.pkey = ''; if (id === 'cluster') refreshPods(); draw(); }).add(' ');
   tb.add(' ');
   tab('all', `1 Избранное (${db.services.length})`); tab('running', `2 Запущенные (${activeN})`); tab('groups', `3 Шаблоны (${db.groups.length})`); tab('cluster', `4 Кластер (${ui.pods.at ? ui.pods.list.length : '…'})`);
   tb.add('  ');
@@ -488,8 +508,8 @@ function renderList() {
   const nameW = Math.max(12, Math.min(26, Math.floor(W * 0.22)));
   const targetW = Math.max(16, Math.min(40, Math.floor(W * 0.33)));
   const h = new Row(2);
-  h.add(' ', C.head).add('  ' + trunc('СЕРВИС', nameW) + ' ', C.head).add(trunc('NS / SERVICE', targetW) + ' ', C.head)
-    .add(trunc('ПОРТ', 14) + ' ', C.head).add('СТАТУС', C.head).fill(C.head);
+  h.add(' ', C.head).add('  ' + trunc(tr('СЕРВИС'), nameW) + ' ', C.head).add(trunc('NS / SERVICE', targetW) + ' ', C.head)
+    .add(trunc(tr('ПОРТ'), 14) + ' ', C.head).add(tr('СТАТУС'), C.head).fill(C.head);
   rows.push(h);
 
   const logH = Math.max(3, Math.min(10, Math.floor(H * 0.3)));
@@ -512,8 +532,8 @@ function renderList() {
     const click = () => onRowClick(idx);
     row.add(idx === ui.sel ? '▌' : ' ', C.yellow + bg, click)
       .add(' ' + st[0] + ' ', st[1] + bg, click)
-      .add(trunc((s.kind === 'pod' ? '⎈ ' : '') + s.name, nameW) + ' ', C.bold + bg, click)
-      .add(trunc(`${s.namespace}/${s.kind === 'pod' ? 'pod/' : ''}${s.service}`, targetW) + ' ', C.dim + bg, click)
+      .add(trunc((s.kind === 'pod' ? '⎈ ' : '') + s.name, nameW) + ' ', C.bold + bg, click, true)
+      .add(trunc(`${s.namespace}/${s.kind === 'pod' ? 'pod/' : ''}${s.service}`, targetW) + ' ', C.dim + bg, click, true)
       .add(trunc(`${s.localPort}:${s.remotePort}`, 14) + ' ', bg, click);
     const left = W - row.x;
     const detail = r.status === 'running' || r.status === 'stopped' && !r.info ? st[2] + (s.autostart ? ' · авто' : '') : `${st[2]} · ${r.info}`;
@@ -523,12 +543,12 @@ function renderList() {
 
   const cur = svcs[ui.sel];
   const sep = new Row(3 + listH);
-  sep.add(' Логи' + (cur ? ': ' + cur.name : '') + ' ', C.head, () => openLogs()).add(cur ? ' L — открыть на весь экран (логи пода) ' : '', C.head, () => openLogs()).fill(C.head); rows.push(sep);
+  sep.add(' Логи' + (cur ? ': ' + D(cur.name) : '') + ' ', C.head, () => openLogs()).add(cur ? ' L — открыть на весь экран (логи пода) ' : '', C.head, () => openLogs()).fill(C.head); rows.push(sep);
   const log = cur ? rt(cur).log : [];
   const shown = log.slice(-logH);
   for (let i = 0; i < logH; i++) {
     const row = new Row(4 + listH + i), l = shown[i];
-    if (l) row.add(' ' + l.t + ' ', C.gray).add(l.text, l.sys ? C.sys : '');
+    if (l) row.add(' ' + l.t + ' ', C.gray).add(l.text, l.sys ? C.sys : '', undefined, !l.sys);
     row.fill(); rows.push(row);
   }
 
@@ -543,6 +563,7 @@ function renderList() {
     { key: 'L', label: 'Логи пода', fn: () => openLogs() },
     { key: 'G', label: 'В шаблон', fn: () => saveRunningAsGroup() },
     { key: '/', label: 'Поиск', fn: () => { ui.searching = true; draw(); } },
+    { key: 'O', label: 'Настройки', fn: () => openSettings() },
     { key: 'K', label: 'Конфиг', fn: () => switchKubeconfig() },
     { key: 'Q', label: 'Выход', fn: () => quit() },
   ];
@@ -589,7 +610,7 @@ function askDelete() {
   const s = curSvc(); if (!s) return;
   if (s.kind === 'pod') return flash('это проброс из вкладки «Кластер»: его можно только остановить (Enter)');
   ui.mode = 'confirm';
-  ui.confirm = { msg: `Удалить «${s.name}»?`, yes: () => { stop(s); db.services.splice(db.services.indexOf(s), 1); db.groups.forEach(g => { g.services = g.services.filter(id => id !== s.id); }); saveDb(); closeConfirm(); } };
+  ui.confirm = { msg: `Удалить «${D(s.name)}»?`, yes: () => { stop(s); db.services.splice(db.services.indexOf(s), 1); db.groups.forEach(g => { g.services = g.services.filter(id => id !== s.id); }); saveDb(); closeConfirm(); } };
   draw();
 }
 function askQuit() {
@@ -618,7 +639,7 @@ function openServiceForm(s, preset) {
   const isNew = !s;
   const last = db.services[db.services.length - 1];
   const f = {
-    title: s ? `Изменить: ${s.name}` : preset ? 'Добавить в избранное' : 'Новый сервис',
+    title: s ? `Изменить: ${D(s.name)}` : preset ? 'Добавить в избранное' : 'Новый сервис',
     focus: 0, err: '',
     fields: [
       { key: 'name', label: 'Имя', value: src ? src.name : '' },
@@ -644,7 +665,7 @@ function submitService(f, s) {
   if (!v('name') || !v('namespace') || !v('service') || !v('remotePort')) return fail(f, 'Заполните имя, namespace, service и порт сервиса');
   if (!(lp >= 1 && lp <= 65535)) return fail(f, 'Локальный порт: число 1–65535');
   const dup = db.services.find(x => x !== s && Number(x.localPort) === lp);
-  if (dup) return fail(f, `Порт ${lp} уже занят сервисом «${dup.name}»`);
+  if (dup) return fail(f, `Порт ${lp} уже занят сервисом «${D(dup.name)}»`);
   const data = {
     name: v('name'), namespace: v('namespace'), service: v('service'), localPort: lp,
     remotePort: v('remotePort'), kubeconfig: v('kubeconfig'), autostart: !!fval(f, 'autostart'),
@@ -686,8 +707,39 @@ function applyKubeconfig(file) {
   const act = allSvcs().filter(s => isActive(s) && !s.kubeconfig);
   if (!act.length) { apply(); return draw(); }
   ui.mode = 'confirm';
-  ui.confirm = { msg: `Переключить на «${path.basename(file)}»? Будет остановлено пробросов: ${act.length}`, yes: () => { act.forEach(stop); for (const [k, v] of eph) if (act.includes(v)) eph.delete(k); apply(); closeConfirm(); } };
+  ui.confirm = { msg: `Переключить на «${D(path.basename(file))}»? Будет остановлено пробросов: ${act.length}`, yes: () => { act.forEach(stop); for (const [k, v] of eph) if (act.includes(v)) eph.delete(k); apply(); closeConfirm(); } };
   draw();
+}
+// Настройки: папка с kubeconfig, язык интерфейса, сведения о приложении
+function openSettings() {
+  const f = {
+    title: 'Настройки', focus: 0, err: '',
+    fields: [
+      { key: 'dir', label: 'Папка с kubeconfig', value: db.kubeconfigDir || '', hint: 'например C:\\Users\\me\\kube' },
+      { key: 'lang', label: 'Язык / Language', value: UILANG, choice: [{ v: 'ru', label: 'Русский' }, { v: 'en', label: 'English' }] },
+    ],
+    buttons: [
+      { key: 'Enter', label: 'Сохранить', fn: () => submitSettings(f) },
+      { key: 'Esc', label: 'Отмена', fn: closeForm },
+    ],
+    submit: () => submitSettings(f),
+  };
+  f.info = () => ['', 'О приложении', `  Версия: ${VERSION}`];
+  openForm(f);
+}
+function submitSettings(f) {
+  const raw = String(fval(f, 'dir')).trim().replace(/^"|"$/g, '');
+  let dir = '';
+  if (raw) {
+    dir = path.resolve(expandHome(raw));
+    let ok = false;
+    try { ok = fs.statSync(dir).isDirectory(); } catch (_) {}
+    if (!ok) return fail(f, 'Такой папки нет: ' + dir);
+  }
+  db.kubeconfigDir = dir;
+  const lang = fval(f, 'lang');
+  if (lang === 'ru' || lang === 'en') { db.lang = lang; UILANG = lang; }
+  saveDb(); closeForm();
 }
 function openKubeDirForm() {
   const f = {
@@ -718,9 +770,14 @@ function renderForm() {
   f.fields.forEach((fl, i) => {
     const y = 2 + i, r = new Row(y), focus = i === f.focus;
     const focusFn = () => { f.focus = i; if (fl.bool) fl.value = !fl.value; draw(); };
-    r.add('  ').add(trunc(fl.label, labelW), focus ? C.yellow : C.dim, focusFn);
+    r.add('  ').add(trunc(tr(fl.label), labelW), focus ? C.yellow : C.dim, focusFn);
     if (fl.bool) {
       r.add(fl.value ? ' [x] ' : ' [ ] ', focus ? C.inputF : C.input, focusFn);
+    } else if (fl.choice) {
+      for (const o of fl.choice) {
+        const on = o.v === fl.value;
+        r.add(` ${on ? '●' : '○'} ${o.label} `, on ? (focus ? C.inputF : C.input + C.bold) : C.input + C.gray, () => { f.focus = i; fl.value = o.v; draw(); }, true).add(' ');
+      }
     } else {
       const txt = String(fl.value), st = focus ? C.inputF : C.input;
       r.add(' ', st, focusFn);
@@ -732,10 +789,12 @@ function renderForm() {
     r.fill(); rows.push(r);
   });
   const y0 = 2 + f.fields.length;
-  rows.push(new Row(y0).add('  ' + (f.info ? f.info() : ''), C.sys).fill());
-  rows.push(new Row(y0 + 1).add('  ' + f.err, C.red).fill());
-  for (const r of buttonRows(y0 + 2, f.buttons)) { r.fill(); rows.push(r); }
-  rows.push(new Row(y0 + 4).add('  Tab/↑↓ — поля · ←→ Home End — курсор · Ctrl+V — вставить · Ctrl+U — очистить · Пробел — галочка', C.gray).fill());
+  const infoLines = [].concat(f.info ? f.info() : '');
+  infoLines.forEach((t, k) => rows.push(new Row(y0 + k).add('  ' + t, C.sys).fill()));
+  const yb = y0 + infoLines.length;
+  rows.push(new Row(yb).add('  ' + f.err, C.red).fill());
+  for (const r of buttonRows(yb + 1, f.buttons)) { r.fill(); rows.push(r); }
+  rows.push(new Row(yb + 3).add('  Tab/↑↓ — поля · ←→ Home End — курсор · Ctrl+V — вставить · Ctrl+U — очистить · Пробел — галочка/выбор', C.gray).fill());
   return rows;
 }
 
@@ -751,7 +810,12 @@ function formKey(e) {
     case 'ctrl-c': return quit();
     default:
       if (fl.bool) { if (e.k === 'space') fl.value = !fl.value; }
-      else edit(fl, 'value', 'pos', e, fl.digits);
+      else if (fl.choice) {
+        if (e.k === 'left' || e.k === 'right' || e.k === 'space') {
+          const i = fl.choice.findIndex(o => o.v === fl.value), d = e.k === 'left' ? -1 : 1;
+          fl.value = fl.choice[(i + d + fl.choice.length) % fl.choice.length].v;
+        }
+      } else edit(fl, 'value', 'pos', e, fl.digits);
   }
   f.err = '';
   draw();
@@ -971,7 +1035,7 @@ async function podToFavorite(p) {
   const have = db.services.find(x => x.namespace === p.ns && x.service === svc.metadata.name);
   if (have) {
     ui.tab = 'all'; ui.query = ''; ui.sel = Math.max(0, db.services.indexOf(have)); ui.off = 0;
-    flash(`«${have.name}» уже в избранном`); return draw();
+    flash(`«${D(have.name)}» уже в избранном`); return draw();
   }
   let port = svc.spec.ports[0];
   if (svc.spec.ports.length > 1) {
@@ -1146,8 +1210,8 @@ function renderCluster(rows) {
   const nsW = Math.max(10, Math.min(24, Math.floor(W * 0.16)));
   const nameW = Math.max(12, W - (1 + 3 + nsW + 1) - 7 - 17 - 5 - 7 - 10);
   const h = new Row(2);
-  h.add('    ', C.head).add(trunc('NAMESPACE', nsW) + ' ', C.head).add(trunc('ИМЯ', nameW) + ' ', C.head).add(trunc('READY', 6) + ' ', C.head)
-    .add(trunc('СТАТУС', 16) + ' ', C.head).add(trunc('РЕСТ', 4) + ' ', C.head).add(trunc('ВОЗРАСТ', 6) + ' ', C.head).add('ПРОБРОС', C.head).fill(C.head);
+  h.add('    ', C.head).add(trunc('NAMESPACE', nsW) + ' ', C.head).add(trunc(tr('ИМЯ'), nameW) + ' ', C.head).add(trunc('READY', 6) + ' ', C.head)
+    .add(trunc(tr('СТАТУС'), 16) + ' ', C.head).add(trunc(tr('РЕСТ'), 4) + ' ', C.head).add(trunc(tr('ВОЗРАСТ'), 6) + ' ', C.head).add(tr('ПРОБРОС'), C.head).fill(C.head);
   rows.push(h);
   const logH = Math.max(3, Math.min(10, Math.floor(H * 0.3)));
   const listH = Math.max(3, H - 6 - logH);
@@ -1170,7 +1234,7 @@ function renderCluster(rows) {
     const idx = ui.poff + i, bg = idx === ui.psel ? C.sel : '', click = () => onPodClick(idx), col = podColor(p);
     const fw = podFwd(p);
     row.add(idx === ui.psel ? '▌' : ' ', C.yellow + bg, click).add(' ● ', col + bg, click)
-      .add(trunc(p.ns, nsW) + ' ', C.dim + bg, click).add(trunc(p.name, nameW) + ' ', C.bold + bg, click)
+      .add(trunc(p.ns, nsW) + ' ', C.dim + bg, click, true).add(trunc(p.name, nameW) + ' ', C.bold + bg, click, true)
       .add(trunc(`${p.ready}/${p.total}`, 6) + ' ', (p.ready === p.total ? '' : C.yellow) + bg, click)
       .add(trunc(p.status, 16) + ' ', col + bg, click).add(trunc(String(p.restarts), 4) + ' ', (p.restarts ? C.yellow : C.gray) + bg, click)
       .add(trunc(p.age, 6) + ' ', C.gray + bg, click)
@@ -1185,7 +1249,7 @@ function renderCluster(rows) {
   if (cur) {
     const e = podDet.get(podKey(cur)), d = e && e.d;
     det.push(`узел: ${cur.node || '—'}   IP: ${cur.ip || '—'}   возраст: ${cur.age}   перезапусков: ${cur.restartsText}${d && d.created ? '   создан: ' + fmtStart(d.created) : ''}`);
-    for (const f of favsFor(cur)) det.push(`★ избранное: ${f.name} (${f.namespace}/${f.service})  :${f.localPort} → ${f.remotePort}  · ${STATUS[rt(f).status][2]}`);
+    for (const f of favsFor(cur)) det.push(`★ избранное: ${D(f.name)} (${f.namespace}/${f.service})  :${f.localPort} → ${f.remotePort}  · ${STATUS[rt(f).status][2]}`);
     if (d) {
       for (const c of d.containers) {
         const ports = d.ports.filter(x => x.container === c).map(x => `${x.port}/${x.protocol}${x.name ? ' (' + x.name + ')' : ''}`);
@@ -1204,6 +1268,7 @@ function renderCluster(rows) {
     { key: 'N', label: 'Namespace', fn: () => chooseNamespace() },
     { key: 'R', label: 'Обновить', fn: () => refreshPods() },
     { key: '/', label: 'Поиск', fn: () => { ui.searching = true; draw(); } },
+    { key: 'O', label: 'Настройки', fn: () => openSettings() },
     { key: 'K', label: 'Конфиг', fn: () => switchKubeconfig() },
     { key: 'Q', label: 'Выход', fn: () => quit() },
   ];
@@ -1294,7 +1359,7 @@ function submitPodForward(f, p) {
   if (!(rp >= 1 && rp <= 65535)) return fail(f, 'Порт пода: число 1–65535');
   const s = podSvc(p);
   const dup = allSvcs().find(x => x !== s && Number(x.localPort) === lp && isActive(x));
-  if (dup) return fail(f, `Порт ${lp} уже занят сервисом «${dup.name}»`);
+  if (dup) return fail(f, `Порт ${lp} уже занят сервисом «${D(dup.name)}»`);
   s.localPort = lp; s.remotePort = rp;
   eph.set(podKey(p), s);
   closeForm(); start(s);
@@ -1568,11 +1633,11 @@ function addHl(row, text, off, ranges, curK, base) {
   ranges.forEach(([a0, b0], k) => {
     const a = Math.max(a0 - off, pos), b = Math.min(b0 - off, text.length);
     if (b <= a) return;
-    if (a > pos) row.add(text.slice(pos, a), base);
-    row.add(text.slice(a, b), k === curK ? HL_CUR : HL);
+    if (a > pos) row.add(text.slice(pos, a), base, undefined, true);
+    row.add(text.slice(a, b), k === curK ? HL_CUR : HL, undefined, true);
     pos = b;
   });
-  if (pos < text.length) row.add(text.slice(pos), base);
+  if (pos < text.length) row.add(text.slice(pos), base, undefined, true);
 }
 function lvStyle(l) {
   if (l.dim) return C.gray;
@@ -1591,7 +1656,7 @@ function lvStyle(l) {
 function renderLogs() {
   const lv = ui.lv, rows = [], s = lv.svc;
   const n = Math.max(3, H - 4), width = Math.max(10, W - 2);
-  const head = new Row(0).add(` Логи: ${s.name} `, C.title);
+  const head = new Row(0).add(` Логи: ${D(s.name)} `, C.title);
   if (lv.mode === 'all') head.add(` ⎈ все поды (${lv.podCount}) `, C.title);
   else if (lv.podName) {
     head.add(` ⎈ ${lv.podName} `, C.title);
@@ -1643,7 +1708,7 @@ function renderLogs() {
     if (o) {
       row.add(' ');
       const rg = F && F.occ[o.i];
-      if (rg) addHl(row, o.t, o.off, rg, o.i === curLine ? curK : -1, lvStyle(o.l)); else row.add(o.t, lvStyle(o.l));
+      if (rg) addHl(row, o.t, o.off, rg, o.i === curLine ? curK : -1, lvStyle(o.l)); else row.add(o.t, lvStyle(o.l), undefined, !o.l.sys);
     }
     else if (!lines.length && i === 1) row.add(lv.src === 'pod' ? '  Ждём строки логов…' : '  В выводе port-forward пока пусто', C.gray);
     row.fill(); rows.push(row);
@@ -1831,6 +1896,7 @@ function onKey(e) {
   if (e.k === 'char' && e.ch === '3') setTab('groups');
   if (e.k === 'char' && e.ch === '4') setTab('cluster');
   if (ch === 'k') return switchKubeconfig();
+  if (ch === 'o') return openSettings();
   if (isG) {
     const g = curGroup();
     if (ch === 'a') return openGroupForm();
@@ -1905,7 +1971,7 @@ if (process.argv.includes('--update')) {
   process.exit(0);
 }
 if (process.argv.includes('--help') || process.argv.includes('-h')) {
-  console.log(`bftport ${require('./package.json').version} — менеджер kubectl port-forward
+  const helpRu = `bftport ${require('./package.json').version} — менеджер kubectl port-forward
 
 ИСПОЛЬЗОВАНИЕ
   bftport             запустить интерфейс (нужен интерактивный терминал)
@@ -1937,6 +2003,7 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
                  пода (Enter; если под относится к сервису из избранного — запускается он, на своём порту),
                  напрямую к поду (P), логи (L), в избранное (F), смена namespace (N), обновление (R)
   K              выбор kubeconfig из папки (F2 в списке — сменить папку)
+  O              настройки (папка kubeconfig, язык, о приложении)
   Q / Ctrl+C     выход (пробросы останавливаются)
 
 ШАБЛОНЫ
@@ -1951,7 +2018,8 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
 ФАЙЛЫ
   Установлен в: ${__dirname}
   База данных:  ${DB_FILE}
-  Чтобы сбросить всё к стартовому набору, удалите файл базы.`);
+  Чтобы сбросить всё к стартовому набору, удалите файл базы.`;
+  console.log(UILANG === 'en' ? i18n.HELP_EN(VERSION, __dirname, DB_FILE) : helpRu);
   process.exit(0);
 }
 if (!process.stdin.isTTY) { console.error('Нужен интерактивный терминал'); process.exit(1); }
