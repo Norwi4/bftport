@@ -43,6 +43,25 @@ function saveDb() { writeDb(db); }
 function uid() { return Math.random().toString(36).slice(2, 10); }
 
 // ───────────────────────── процессы ─────────────────────────
+// Вкладка «Кластер» работает только на чтение: приложение вызывает kubectl лишь с этими командами,
+// всё остальное (delete, exec, edit, apply, scale…) блокируется здесь, независимо от остального кода.
+const READONLY_VERBS = new Set(['get', 'logs', 'port-forward']);
+function assertReadOnly(args) {
+  for (let i = 0; i < args.length; i++) {
+    const a = String(args[i]);
+    if (a === '-n' || a === '--namespace') { i++; continue; }
+    if (a.startsWith('-')) continue;
+    if (!READONLY_VERBS.has(a)) throw new Error('операция запрещена (только просмотр): kubectl ' + a);
+    return;
+  }
+  throw new Error('пустая команда kubectl');
+}
+function kspawn(args, opts) { assertReadOnly(args); return spawn('kubectl', args, opts); }
+
+// Пробросы к подам из вкладки «Кластер»: живут только в этой сессии и не пишутся в базу.
+const eph = new Map();
+const allSvcs = () => db.services.concat([...eph.values()]);
+
 const runtime = new Map(); // id -> { status, info, proc, want, retries, timer, log[] }
 function rt(s) {
   let r = runtime.get(s.id);
@@ -81,12 +100,12 @@ async function launch(s) {
   }
   if (!r.want) { r.status = 'stopped'; draw(); return; }
   const args = ['-n', s.namespace, 'port-forward', '--address', '0.0.0.0',
-    `service/${s.service}`, `${s.localPort}:${s.remotePort}`];
+    `${s.kind === 'pod' ? 'pod' : 'service'}/${s.service}`, `${s.localPort}:${s.remotePort}`];
   const kc = kubeconfigOf(s);
   if (kc) args.push('--kubeconfig=' + kc);
   say(r, '▶ kubectl ' + args.join(' '), true);
   let p;
-  try { p = spawn('kubectl', args, { windowsHide: true }); }
+  try { p = kspawn(args, { windowsHide: true }); }
   catch (e) { r.status = 'error'; r.info = e.message; r.want = false; draw(); return; }
   r.proc = p;
   const onData = d => {
@@ -108,6 +127,11 @@ async function launch(s) {
     r.proc = null;
     if (r.want) {
       r.retries++;
+      // под мог быть удалён или пересоздан: бесконечно его догонять нет смысла
+      if (s.kind === 'pod' && r.retries > 3) {
+        r.want = false; r.status = 'error'; r.info = ('под недоступен (возможно, удалён) · ' + r.info).slice(0, 200);
+        say(r, '✖ ' + r.info, true); draw(); return;
+      }
       const delay = r.quick ? 300 : Math.min(2000 * r.retries, 15000);
       r.quick = false;
       r.status = 'restarting';
@@ -135,12 +159,13 @@ function restartNow(s) {
 }
 const isActive = s => { const r = rt(s); return r.want || !!r.proc; };
 function killAll() {
-  for (const s of db.services) { const r = rt(s); r.want = false; if (r.proc) try { r.proc.kill(); } catch (_) {} }
+  for (const s of allSvcs()) { const r = rt(s); r.want = false; if (r.proc) try { r.proc.kill(); } catch (_) {} }
   if (ui.lv && ui.lv.proc) try { ui.lv.proc.kill(); } catch (_) {}
 }
 
 function kube(kc, args) {
   return new Promise((resolve, reject) => {
+    try { assertReadOnly(args); } catch (e) { return reject(e); }
     const a = [...args];
     if (kc) a.push('--kubeconfig=' + kc);
     execFile('kubectl', a, { windowsHide: true, maxBuffer: 32 << 20, timeout: 30000 }, (err, out, errOut) => {
@@ -157,6 +182,8 @@ const ui = {
   form: null, picker: null, confirm: null,
   tab: 'all',          // all | running
   lv: null,            // состояние просмотра логов
+  psel: 0, poff: 0, pkey: '', // вкладка «Кластер»: выбранный под
+  pods: { list: [], at: 0, err: '', loading: false, ns: '', gen: 0 },
   gsel: 0, goff: 0,    // выбранный шаблон на вкладке «Шаблоны»
   query: '', searching: false,
   lastClick: { id: null, t: 0 },
@@ -433,9 +460,9 @@ function renderList() {
   t.fill(C.title); rows.push(t);
 
   const tb = new Row(1);
-  const tab = (id, label) => tb.add(` ${label} `, ui.tab === id ? C.key : C.btn, () => { ui.tab = id; ui.sel = 0; ui.off = 0; ui.gsel = 0; ui.goff = 0; draw(); }).add(' ');
+  const tab = (id, label) => tb.add(` ${label} `, ui.tab === id ? C.key : C.btn, () => { ui.tab = id; ui.sel = 0; ui.off = 0; ui.gsel = 0; ui.goff = 0; ui.psel = 0; ui.poff = 0; ui.pkey = ''; if (id === 'cluster') refreshPods(); draw(); }).add(' ');
   tb.add(' ');
-  tab('all', `1 Все (${db.services.length})`); tab('running', `2 Запущенные (${activeN})`); tab('groups', `3 Шаблоны (${db.groups.length})`);
+  tab('all', `1 Все (${db.services.length})`); tab('running', `2 Запущенные (${activeN})`); tab('groups', `3 Шаблоны (${db.groups.length})`); tab('cluster', `4 Кластер (${ui.pods.at ? ui.pods.list.length : '…'})`);
   tb.add('  ');
   const goSearch = () => { ui.searching = true; draw(); };
   tb.add(' ⌕ ', ui.searching ? C.inputF : C.input, goSearch);
@@ -444,9 +471,10 @@ function renderList() {
   if (ui.query || ui.searching) { tb.add(' ', qs, goSearch); addInput(tb, ui, 'query', 'qpos', 'qoff', boxW - 1, qs, ui.searching, goSearch); tb.add(' ', qs, goSearch); }
   else tb.add(trunc('поиск: / или Ctrl+F', boxW) + ' ', qs, goSearch);
   if (ui.query) tb.add(' ✕ ', C.btn, () => { ui.query = ''; ui.qpos = 0; ui.searching = false; ui.sel = 0; ui.gsel = 0; draw(); });
-  if (ui.query) tb.add(` найдено: ${isG ? groupsVisible().length : svcs.length}`, C.dim);
+  if (ui.query) tb.add(` найдено: ${isG ? groupsVisible().length : ui.tab === 'cluster' ? podsVisible().length : svcs.length}`, C.dim);
   tb.fill(); rows.push(tb);
   if (isG) return renderGroups(rows);
+  if (ui.tab === 'cluster') return renderCluster(rows);
 
   const nameW = Math.max(12, Math.min(26, Math.floor(W * 0.22)));
   const targetW = Math.max(16, Math.min(40, Math.floor(W * 0.33)));
@@ -550,12 +578,12 @@ function askDelete() {
   draw();
 }
 function askQuit() {
-  const n = db.services.filter(isActive).length;
+  const n = allSvcs().filter(isActive).length;
   ui.mode = 'confirm';
   ui.confirm = { msg: `Остановить ${n} проброс(ов) и выйти?`, yes: () => exit() };
   draw();
 }
-function quit() { db.services.some(isActive) ? askQuit() : exit(); }
+function quit() { allSvcs().some(isActive) ? askQuit() : exit(); }
 function closeConfirm() { ui.mode = 'list'; ui.confirm = null; draw(); }
 function exit() {
   killAll();
@@ -636,12 +664,12 @@ async function switchKubeconfig() {
 }
 function applyKubeconfig(file) {
   if (sameFile(file, db.kubeconfig)) return;
-  const apply = () => { db.kubeconfig = file; saveDb(); };
+  const apply = () => { db.kubeconfig = file; saveDb(); resetPods(); };
   // пробросы привязаны к кластеру, поэтому при смене конфига останавливаем те, что используют общий
-  const act = db.services.filter(s => isActive(s) && !s.kubeconfig);
+  const act = allSvcs().filter(s => isActive(s) && !s.kubeconfig);
   if (!act.length) { apply(); return draw(); }
   ui.mode = 'confirm';
-  ui.confirm = { msg: `Переключить на «${path.basename(file)}»? Будет остановлено пробросов: ${act.length}`, yes: () => { act.forEach(stop); apply(); closeConfirm(); } };
+  ui.confirm = { msg: `Переключить на «${path.basename(file)}»? Будет остановлено пробросов: ${act.length}`, yes: () => { act.forEach(stop); for (const [k, v] of eph) if (act.includes(v)) eph.delete(k); apply(); closeConfirm(); } };
   draw();
 }
 function openKubeDirForm() {
@@ -894,6 +922,242 @@ function formatLog(text) {
   return out;
 }
 
+// ───────────────────────── вкладка «Кластер»: все поды, только просмотр ─────────────────────────
+const podKey = p => p.ns + '/' + p.name;
+function podSvc(p) {
+  return eph.get(podKey(p)) || { id: 'pod:' + podKey(p), name: p.name, namespace: p.ns, service: p.name, kind: 'pod', kubeconfig: '', localPort: 0, remotePort: 0 };
+}
+function podRecord(i) {
+  const st = i.status || {}, spec = i.spec || {}, md = i.metadata || {};
+  const cs = st.containerStatuses || [], ics = st.initContainerStatuses || [];
+  let status = st.phase || 'Unknown';
+  if (md.deletionTimestamp) status = 'Terminating';
+  else {
+    const iw = ics.find(c => c.state && c.state.waiting && c.state.waiting.reason);
+    const w = cs.find(c => c.state && c.state.waiting && c.state.waiting.reason);
+    const t = cs.find(c => c.state && c.state.terminated && c.state.terminated.reason && !c.ready);
+    if (iw) status = 'Init:' + iw.state.waiting.reason;
+    else if (w) status = w.state.waiting.reason;
+    else if (t && st.phase !== 'Succeeded') status = t.state.terminated.reason;
+    else if (st.reason) status = st.reason;
+    else if (st.phase === 'Succeeded') status = 'Completed';
+  }
+  const containers = spec.containers || [];
+  const ports = [];
+  for (const c of containers) for (const pt of c.ports || []) ports.push({ container: c.name, name: pt.name || '', port: pt.containerPort, protocol: pt.protocol || 'TCP' });
+  return {
+    ns: md.namespace || '', name: md.name || '', status, phase: st.phase || '',
+    ready: cs.filter(c => c.ready).length, total: containers.length,
+    restarts: cs.reduce((a, c) => a + (c.restartCount || 0), 0),
+    created: md.creationTimestamp || '', start: st.startTime || '', node: spec.nodeName || '', ip: st.podIP || '',
+    containers: containers.map(c => c.name), ports,
+  };
+}
+function podColor(p) {
+  if (/^(Completed|Succeeded)$/.test(p.status)) return C.gray;
+  if (/Error|CrashLoop|BackOff|Failed|Evicted|OOM|Unknown|ErrImage|Invalid|CreateContainer/i.test(p.status)) return C.red;
+  if (/Pending|ContainerCreating|PodInitializing|Terminating|Init|Waiting/i.test(p.status)) return C.yellow;
+  if (p.status === 'Running') return p.ready === p.total ? C.green : C.yellow;
+  return '';
+}
+function fmtAgeShort(iso) {
+  const d = new Date(iso);
+  if (!iso || isNaN(d)) return '';
+  const sec = Math.max(0, Math.round((Date.now() - d) / 1000));
+  return sec < 60 ? `${sec}с` : sec < 3600 ? `${Math.floor(sec / 60)}м` : sec < 172800 ? `${Math.floor(sec / 3600)}ч` : `${Math.floor(sec / 86400)}д`;
+}
+function podsVisible() {
+  const terms = ui.query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return ui.pods.list;
+  return ui.pods.list.filter(p => { const h = (p.ns + ' ' + p.name + ' ' + p.status).toLowerCase(); return terms.every(t => h.includes(t)); });
+}
+function resetPods(keepNs) {
+  const P = ui.pods;
+  ui.pods = { list: [], at: 0, err: '', loading: false, ns: keepNs ? P.ns : '', gen: P.gen + 1 };
+  ui.psel = 0; ui.poff = 0; ui.pkey = '';
+  if (ui.tab === 'cluster') refreshPods();
+}
+async function refreshPods() {
+  const P = ui.pods;
+  if (P.loading) return;
+  const kc = db.kubeconfig;
+  if (!kc) { P.err = 'kubeconfig не выбран — нажмите K'; P.list = []; return draw(); }
+  P.loading = true; const gen = P.gen; draw();
+  try {
+    const d = await kube(kc, ['get', 'pods', ...(P.ns ? ['-n', P.ns] : ['-A']), '-o', 'json']);
+    if (gen !== P.gen) return;
+    P.list = d.items.map(podRecord).sort((a, b) => a.ns.localeCompare(b.ns) || a.name.localeCompare(b.name));
+    P.err = ''; P.at = Date.now();
+    const i = podsVisible().findIndex(x => podKey(x) === ui.pkey); // выбор «прилипает» к поду, а не к номеру строки
+    if (i >= 0) ui.psel = i;
+  } catch (e) { if (gen === P.gen) P.err = e.message; }
+  finally { if (gen === P.gen) { P.loading = false; draw(); } }
+}
+setInterval(() => { if (ui.tab === 'cluster' && ui.mode === 'list' && !ui.searching) refreshPods(); }, 8000);
+
+function renderCluster(rows) {
+  const P = ui.pods, ps = podsVisible();
+  const nsW = Math.max(10, Math.min(24, Math.floor(W * 0.16)));
+  const nameW = Math.max(12, W - (1 + 3 + nsW + 1) - 7 - 17 - 5 - 7 - 10);
+  const h = new Row(2);
+  h.add('    ', C.head).add(trunc('NAMESPACE', nsW) + ' ', C.head).add(trunc('ИМЯ', nameW) + ' ', C.head).add(trunc('READY', 6) + ' ', C.head)
+    .add(trunc('СТАТУС', 16) + ' ', C.head).add(trunc('РЕСТ', 4) + ' ', C.head).add(trunc('ВОЗРАСТ', 6) + ' ', C.head).add('ПРОБРОС', C.head).fill(C.head);
+  rows.push(h);
+  const logH = Math.max(3, Math.min(10, Math.floor(H * 0.3)));
+  const listH = Math.max(3, H - 6 - logH);
+  if (ui.psel >= ps.length) ui.psel = Math.max(0, ps.length - 1);
+  if (ui.psel < ui.poff) ui.poff = ui.psel;
+  if (ui.psel >= ui.poff + listH) ui.poff = ui.psel - listH + 1;
+  const cur = ps[ui.psel];
+  ui.pkey = cur ? podKey(cur) : '';
+  for (let i = 0; i < listH; i++) {
+    const row = new Row(3 + i), p = ps[ui.poff + i];
+    if (!p) {
+      if (i === 1 && !ps.length) {
+        if (P.err) row.add('  ' + P.err, C.red);
+        else if (!P.at) row.add(P.loading ? '  Загрузка подов из кластера…' : '  Нет данных', C.yellow);
+        else row.add(ui.query ? '  Ничего не найдено по запросу' : '  В выбранном namespace нет подов', C.dim);
+      } else if (i === 2 && !ps.length && P.err) row.add('  N — выбрать namespace (если нет прав на весь кластер) · R — повторить · K — другой конфиг', C.gray);
+      row.fill(); rows.push(row); continue;
+    }
+    const idx = ui.poff + i, bg = idx === ui.psel ? C.sel : '', click = () => onPodClick(idx), col = podColor(p);
+    const fs_ = eph.get(podKey(p)), fr = fs_ && rt(fs_);
+    const fwd = fs_ && (isActive(fs_) || fr.status === 'error') ? `⇄ :${fs_.localPort}${fr.status === 'running' ? '' : ' ' + STATUS[fr.status][2]}` : '';
+    row.add(idx === ui.psel ? '▌' : ' ', C.yellow + bg, click).add(' ● ', col + bg, click)
+      .add(trunc(p.ns, nsW) + ' ', C.dim + bg, click).add(trunc(p.name, nameW) + ' ', C.bold + bg, click)
+      .add(trunc(`${p.ready}/${p.total}`, 6) + ' ', (p.ready === p.total ? '' : C.yellow) + bg, click)
+      .add(trunc(p.status, 16) + ' ', col + bg, click).add(trunc(String(p.restarts), 4) + ' ', (p.restarts ? C.yellow : C.gray) + bg, click)
+      .add(trunc(fmtAgeShort(p.created), 6) + ' ', C.gray + bg, click)
+      .add(trunc(fwd, Math.max(0, W - row.x)), (fr && fr.status === 'error' ? C.red : fr && fr.status === 'running' ? C.green : C.yellow) + bg, click);
+    row.fill(bg); rows.push(row);
+  }
+  const nsLabel = P.ns ? 'namespace: ' + P.ns : 'все namespace';
+  const upd = P.at ? new Date(P.at).toTimeString().slice(0, 8) : '—';
+  rows.push(new Row(3 + listH).add(` Детали${cur ? ': ' + podKey(cur) : ''} `, C.head)
+    .add(` ${ps.length}/${P.list.length} подов · ${nsLabel} · обновлено ${upd}${P.loading ? ' · обновление…' : ''} · только просмотр `, C.head).fill(C.head));
+  const det = [];
+  if (cur) {
+    det.push(`узел: ${cur.node || '—'}   IP: ${cur.ip || '—'}   создан: ${fmtStart(cur.created) || '—'}   перезапусков: ${cur.restarts}`);
+    for (const c of cur.containers) {
+      const ports = cur.ports.filter(x => x.container === c).map(x => `${x.port}/${x.protocol}${x.name ? ' (' + x.name + ')' : ''}`);
+      det.push(`• ${c}   ${ports.length ? 'порты: ' + ports.join(', ') : 'порты не объявлены'}`);
+    }
+  }
+  for (let i = 0; i < logH; i++) rows.push(new Row(4 + listH + i).add(det[i] ? ' ' + det[i] : '', i === 0 ? '' : C.dim).fill());
+  const fs2 = cur && eph.get(podKey(cur));
+  const btns = [
+    { key: 'Enter', label: fs2 && isActive(fs2) ? 'Стоп проброса' : 'Проброс порта', fn: () => podAction() },
+    { key: 'L', label: 'Логи', fn: () => cur && openPodLogs(cur) },
+    { key: 'N', label: 'Namespace', fn: () => chooseNamespace() },
+    { key: 'R', label: 'Обновить', fn: () => refreshPods() },
+    { key: '/', label: 'Поиск', fn: () => { ui.searching = true; draw(); } },
+    { key: 'K', label: 'Конфиг', fn: () => switchKubeconfig() },
+    { key: 'Q', label: 'Выход', fn: () => quit() },
+  ];
+  for (const r of buttonRows(4 + listH + logH, btns)) { r.fill(); rows.push(r); }
+  return rows;
+}
+function onPodClick(idx) {
+  const p = podsVisible()[idx], now = Date.now();
+  if (ui.lastClick.id === podKey(p) && now - ui.lastClick.t < 450) { ui.psel = idx; ui.lastClick = { id: null, t: 0 }; podAction(); }
+  else { ui.psel = idx; ui.lastClick = { id: podKey(p), t: now }; draw(); }
+}
+async function chooseNamespace() {
+  const kc = db.kubeconfig;
+  if (!kc) return switchKubeconfig();
+  const res = await pick('Namespace', kube(kc, ['get', 'ns', '-o', 'json']).then(d => [{ label: 'Все namespace', value: '' }, ...d.items.map(i => i.metadata.name).sort().map(n => ({ label: n, value: n }))]), { f2: 'Ввести вручную', current: ui.pods.ns });
+  if (res === PICK_FOLDER) return openNsForm();
+  if (res === null) return;
+  ui.pods.ns = res; resetPods(true);
+}
+function openNsForm() {
+  const f = {
+    title: 'Namespace', focus: 0, err: '', fields: [{ key: 'ns', label: 'Namespace', value: ui.pods.ns, hint: 'пусто = все namespace' }],
+    buttons: [
+      { key: 'Enter', label: 'Показать', fn: () => { ui.pods.ns = String(fval(f, 'ns')).trim(); closeForm(); resetPods(true); } },
+      { key: 'Esc', label: 'Отмена', fn: closeForm },
+    ],
+    submit: () => f.buttons[0].fn(),
+  };
+  openForm(f);
+}
+function podAction() {
+  const p = podsVisible()[ui.psel]; if (!p) return;
+  const s = eph.get(podKey(p));
+  if (s && isActive(s)) { stop(s); return draw(); }
+  openPodForward(p);
+}
+function openPodForward(p) {
+  const used = new Set(allSvcs().filter(x => x.localPort).map(x => Number(x.localPort)));
+  const remote = p.ports.length ? p.ports[0].port : '';
+  let local = remote || '';
+  while (local && used.has(Number(local)) && local < 65535) local++;
+  const f = {
+    title: `Проброс порта пода ${p.name}`, focus: 0, err: '',
+    fields: [
+      { key: 'lport', label: 'Локальный порт', value: String(local), digits: true },
+      { key: 'rport', label: 'Порт пода', value: String(remote), digits: true, hint: 'номер порта контейнера' },
+    ],
+    buttons: [
+      { key: 'Enter', label: 'Пробросить', fn: () => submitPodForward(f, p) },
+      { key: 'F2', label: 'Выбрать порт пода', fn: () => choosePodPort(f, p) },
+      { key: 'Esc', label: 'Отмена', fn: closeForm },
+    ],
+    submit: () => submitPodForward(f, p),
+  };
+  f.info = () => p.ports.length ? 'Порты пода: ' + p.ports.map(x => `${x.port}${x.name ? '(' + x.name + ')' : ''}/${x.protocol}`).join(', ') : 'У пода порты не объявлены — укажите порт вручную';
+  openForm(f);
+}
+async function choosePodPort(f, p) {
+  if (!p.ports.length) { f.err = 'У пода нет объявленных портов'; return draw(); }
+  const items = p.ports.map(x => ({ label: `${x.port}/${x.protocol}  ${x.name || ''}  (контейнер ${x.container})`, value: x.port }));
+  const v = await pick(`Порт пода ${p.name}`, items);
+  if (v) { fset(f, 'rport', String(v)); if (!String(fval(f, 'lport')).trim()) fset(f, 'lport', String(v)); }
+  draw();
+}
+function submitPodForward(f, p) {
+  const lp = Number(String(fval(f, 'lport')).trim()), rp = Number(String(fval(f, 'rport')).trim());
+  if (!(lp >= 1 && lp <= 65535)) return fail(f, 'Локальный порт: число 1–65535');
+  if (!(rp >= 1 && rp <= 65535)) return fail(f, 'Порт пода: число 1–65535');
+  const s = podSvc(p);
+  const dup = allSvcs().find(x => x !== s && Number(x.localPort) === lp && (db.services.includes(x) || isActive(x)));
+  if (dup) return fail(f, `Порт ${lp} уже занят сервисом «${dup.name}»`);
+  s.localPort = lp; s.remotePort = rp;
+  eph.set(podKey(p), s);
+  closeForm(); start(s);
+}
+// Логи пода: тот же просмотр, что и для сервиса, но без выбора пода — выбран конкретный
+function openPodLogs(p) {
+  const s = podSvc(p);
+  ui.lv = { svc: s, src: 'pod', pod: [], scroll: 0, filter: '', searching: false, wrap: true, proc: null, timer: null, closed: false,
+    gen: 0, retries: 0, endedAt: 0, msg: 'подключение…', selector: '', carryO: '', carryE: '',
+    mode: 'one', podName: p.name, podInfo: { name: p.name, start: p.start, phase: p.status, container: '', containers: p.containers.length },
+    podCount: 1, fmt: true, fmtGen: 0, container: '' };
+  ui.mode = 'logs';
+  podLogsStart(ui.lv); draw();
+}
+async function chooseContainer(lv) {
+  let res;
+  try { res = await resolvePods(kubeconfigOf(lv.svc), lv.svc); }
+  catch (e) { lv.msg = 'ошибка: ' + e.message; return draw(); }
+  if (lv.closed) return;
+  const list = res.pods[0].list || [];
+  if (list.length < 2) { lv.msg = 'в поде один контейнер'; return draw(); }
+  const cur = lv.container || res.pods[0].container;
+  const c = await pick(`Контейнер пода ${lv.svc.service}`, list.map(n => ({ label: (n === cur ? '● ' : '  ') + n, value: n })), { current: cur });
+  if (lv.closed) return;
+  if (c) { lv.container = c; podLogsRestart(lv); }
+  draw();
+}
+async function resolvePods(kc, s) {
+  if (s.kind === 'pod') {
+    const i = await kube(kc, ['-n', s.namespace, 'get', 'pod', s.service, '-o', 'json']);
+    const list = (i.spec.containers || []).map(c => c.name);
+    return { sel: '', pods: [{ name: i.metadata.name, start: i.status.startTime || '', phase: i.status.phase || '', container: mainContainer(i), containers: list.length, list }] };
+  }
+  return listPods(kc, s);
+}
+
 // ───────────────────────── логи пода (как в Lens) ─────────────────────────
 const LOG_BUF = 5000;
 const cleanLine = t => t.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '').replace(/\t/g, '  ').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
@@ -979,7 +1243,7 @@ async function podLogsStart(lv) {
   lv.msg = 'ищу поды…'; draw();
   const stale = () => lv.closed || my !== lv.gen;
   let sel, pods;
-  try { ({ sel, pods } = await listPods(kc, s)); }
+  try { ({ sel, pods } = await resolvePods(kc, s)); }
   catch (e) {
     if (stale()) return;
     lv.msg = 'ошибка: ' + e.message + ' — повтор…';
@@ -1011,13 +1275,13 @@ function streamLogs(lv, my, kc, sel, pods) {
   const s = lv.svc;
   const args = ['-n', s.namespace, 'logs'];
   if (lv.mode === 'all') args.push('-l', sel, '--prefix', '--max-log-requests=20');
-  else { const pd = pods.find(x => x.name === lv.podName); args.push(lv.podName); if (pd && pd.container) args.push('-c', pd.container); }
+  else { const pd = pods.find(x => x.name === lv.podName); args.push(lv.podName); const cont = lv.container || (pd && pd.container); if (cont) args.push('-c', cont); }
   args.push('-f');
   // при переподключении берём только то, что появилось с момента обрыва (чтобы не дублировать историю)
   if (lv.endedAt) args.push(`--since=${Math.ceil((Date.now() - lv.endedAt) / 1000) + 1}s`, '--tail=-1'); else args.push('--tail=300');
   if (kc) args.push('--kubeconfig=' + kc);
   let p;
-  try { p = spawn('kubectl', args, { windowsHide: true }); }
+  try { p = kspawn(args, { windowsHide: true }); }
   catch (e) { lv.msg = 'ошибка: ' + e.message; return draw(); }
   lv.proc = p; lv.msg = 'поток открыт'; draw();
   p.stdout.setEncoding('utf8'); p.stderr.setEncoding('utf8');
@@ -1034,6 +1298,7 @@ function streamLogs(lv, my, kc, sel, pods) {
 }
 // P: сменить под во время просмотра
 async function choosePod(lv) {
+  if (lv.svc.kind === 'pod') return chooseContainer(lv);
   let res;
   try { res = await listPods(kubeconfigOf(lv.svc), lv.svc); }
   catch (e) { lv.msg = 'ошибка: ' + e.message; return draw(); }
@@ -1079,6 +1344,7 @@ function renderLogs() {
   if (lv.mode === 'all') head.add(` ⎈ все поды (${lv.podCount}) `, C.title);
   else if (lv.podName) {
     head.add(` ⎈ ${lv.podName} `, C.title);
+    if (s.kind === 'pod' && lv.podInfo && lv.podInfo.containers > 1) head.add(` [${lv.container || lv.podInfo.container}] `, C.title);
     if (lv.podInfo && lv.podInfo.start) head.add(` запущен ${fmtStart(lv.podInfo.start)} `, C.title);
   } else head.add(` ${s.namespace}/${s.service} `, C.title);
   rows.push(head.fill(C.title));
@@ -1129,7 +1395,7 @@ function renderLogs() {
     { key: '/', label: 'Фильтр', fn: () => { lv.searching = true; draw(); } },
     { key: 'F', label: lv.fmt ? 'Формат: logback' : 'Формат: как есть', fn: () => { lv.fmt = !lv.fmt; lv.fmtGen++; lv.scroll = 0; draw(); } },
     { key: 'W', label: lv.wrap ? 'Не переносить' : 'Переносить', fn: () => { lv.wrap = !lv.wrap; draw(); } },
-    { key: 'P', label: 'Сменить под', fn: () => choosePod(lv) },
+    { key: 'P', label: s.kind === 'pod' ? 'Контейнер' : 'Сменить под', fn: () => choosePod(lv) },
     { key: 'R', label: 'Перечитать', fn: () => { podLogsRestart(lv); draw(); } },
     { key: 'C', label: 'Очистить', fn: () => { lv.pod = []; lv.scroll = 0; draw(); } },
     { key: 'Tab', label: 'Источник', fn: () => { lv.src = lv.src === 'pod' ? 'pf' : 'pod'; lv.scroll = 0; draw(); } },
@@ -1258,11 +1524,11 @@ function onKey(e) {
     if (e.k === 'esc' || ch === 'n') return closeConfirm();
     return;
   }
-  const isG = ui.tab === 'groups';
-  const sk = isG ? 'gsel' : 'sel';
-  const n = isG ? groupsVisible().length : visible().length;
-  const TABS = ['all', 'running', 'groups'];
-  const setTab = t => { ui.tab = t; ui.sel = 0; ui.off = 0; ui.gsel = 0; ui.goff = 0; };
+  const isG = ui.tab === 'groups', isC = ui.tab === 'cluster';
+  const sk = isG ? 'gsel' : isC ? 'psel' : 'sel';
+  const n = isG ? groupsVisible().length : isC ? podsVisible().length : visible().length;
+  const TABS = ['all', 'running', 'groups', 'cluster'];
+  const setTab = t => { ui.tab = t; ui.sel = 0; ui.off = 0; ui.gsel = 0; ui.goff = 0; ui.psel = 0; ui.poff = 0; ui.pkey = ''; if (t === 'cluster') refreshPods(); };
   const nextTab = () => setTab(TABS[(TABS.indexOf(ui.tab) + 1) % TABS.length]);
   if (ui.searching) {
     switch (e.k) {
@@ -1289,8 +1555,8 @@ function onKey(e) {
     case 'pgdn': ui[sk] = Math.min(n - 1, ui[sk] + 8); break;
     case 'home': ui[sk] = 0; break;
     case 'end': ui[sk] = Math.max(0, n - 1); break;
-    case 'enter': case 'space': return isG ? toggleGroup(curGroup()) : toggle();
-    case 'del': return isG ? askDeleteGroup() : askDelete();
+    case 'enter': case 'space': return isG ? toggleGroup(curGroup()) : isC ? podAction() : toggle();
+    case 'del': if (isC) break; return isG ? askDeleteGroup() : askDelete();
     case 'tab': nextTab(); break;
     case 'ctrl-f': ui.searching = true; break;
     case 'esc': if (ui.query) { ui.query = ''; ui[sk] = 0; } break;
@@ -1299,6 +1565,7 @@ function onKey(e) {
   if (e.k === 'char' && e.ch === '1') setTab('all');
   if (e.k === 'char' && e.ch === '2') setTab('running');
   if (e.k === 'char' && e.ch === '3') setTab('groups');
+  if (e.k === 'char' && e.ch === '4') setTab('cluster');
   if (ch === 'k') return switchKubeconfig();
   if (isG) {
     const g = curGroup();
@@ -1307,6 +1574,11 @@ function onKey(e) {
     if (ch === 'd') return askDeleteGroup();
     if (ch === 's' && g) members(g).forEach(start);
     if (ch === 'x' && g) members(g).forEach(stop);
+  } else if (isC) {
+    const pd = podsVisible()[ui.psel];
+    if (ch === 'l' && pd) return openPodLogs(pd);
+    if (ch === 'n') return chooseNamespace();
+    if (ch === 'r') refreshPods();
   } else {
     const cur = curSvc();
     if (ch === 'a') return openServiceForm();
@@ -1394,6 +1666,8 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   Ctrl+U — очистить, Ctrl+V / Shift+Insert — вставить из буфера обмена
   1 2 3 / Tab    вкладки: Все, Запущенные, Шаблоны
   G              сохранить запущенные сервисы как шаблон
+  4 Кластер      все поды кластера без ручного добавления (только просмотр): поиск, проброс порта
+                 пода (Enter), логи (L), смена namespace (N), обновление (R)
   K              выбор kubeconfig из папки (F2 в списке — сменить папку)
   Q / Ctrl+C     выход (пробросы останавливаются)
 
