@@ -63,6 +63,8 @@ const PHRASES = [
   ['имя порта (grpc) или номер', 'port name (grpc) or number'], ['номер порта контейнера', 'container port number'],
   ['Папка с kubeconfig-файлами', 'Folder with kubeconfig files'], ['Папка с kubeconfig', 'kubeconfig folder'], ['Путь к папке', 'Folder path'],
   ['например ', 'e.g. '], ['Такой папки нет: ', 'No such folder: '], ['Укажите путь к папке', 'Enter a folder path'],
+  ['Это путь от другой ОС — укажите путь для этой системы', 'This is a path from another OS — enter a path for this system'],
+  ['пути к kubeconfig от другой ОС сброшены — выберите папку в настройках (O)', 'kubeconfig paths from another OS were reset — pick the folder in settings (O)'],
   ['После сохранения откроется список конфигов из этой папки', 'After saving, the list of configs from this folder will open'],
   ['Заполните имя, namespace, service и порт сервиса', 'Fill in name, namespace, service and service port'],
   ['Введите название шаблона', 'Enter a template name'], ['Выберите хотя бы один сервис (F2)', 'Select at least one service (F2)'],

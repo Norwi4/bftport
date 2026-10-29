@@ -18,6 +18,20 @@ const LOG_MAX = 300;
 const VERSION = require('./package.json').version;
 
 // ───────────────────────── база ─────────────────────────
+// Пути в базе абсолютные и привязаны к ОС. Если базу перенесли с Windows на Linux (или наоборот), такие пути
+// бесполезны: path.dirname('C:\\a\\b') на Linux даёт '.', то есть «папка с конфигами» стала бы текущей папкой.
+const foreignPath = p => !!p && (process.platform === 'win32' ? /^\/(?!\/)/.test(p) : /^([A-Za-z]:[\\/]|\\\\)/.test(p));
+let RESET_PATHS = 0; // сколько путей из чужой ОС сброшено при загрузке (показываем сообщение)
+function dropForeignPaths(d) {
+  let n = 0;
+  const bad = x => { if (foreignPath(x)) { n++; return true; } return false; };
+  if (bad(d.kubeconfig)) d.kubeconfig = '';
+  if (bad(d.kubeconfigDir)) d.kubeconfigDir = '';
+  for (const sv of d.services || []) if (bad(sv.kubeconfig)) sv.kubeconfig = '';
+  return n;
+}
+const exampleDir = () => (process.platform === 'win32' ? 'C:\\Users\\me\\kube' : '~/.kube');
+
 let db = loadDb();
 
 // ── язык интерфейса: из настроек, а если не выбран — по языку системы
@@ -44,6 +58,8 @@ function loadDb() {
     d.services = (d.services || []).map(s => { if (s.id) return s; dirty = true; return { id: uid(), ...s }; });
     // шаблоны (группы) ссылаются на сервисы по id
     d.groups = (d.groups || []).map(g => ({ id: g.id || uid(), name: g.name, services: (g.services || []).filter(id => d.services.some(s => s.id === id)) }));
+    RESET_PATHS = dropForeignPaths(d);
+    if (RESET_PATHS) dirty = true;
     if (!d.kubeconfigDir && d.kubeconfig) d.kubeconfigDir = path.dirname(d.kubeconfig);
     if (dirty) writeDb(d);
     return d;
@@ -715,7 +731,7 @@ function openSettings() {
   const f = {
     title: 'Настройки', focus: 0, err: '',
     fields: [
-      { key: 'dir', label: 'Папка с kubeconfig', value: db.kubeconfigDir || '', hint: 'например C:\\Users\\me\\kube' },
+      { key: 'dir', label: 'Папка с kubeconfig', value: db.kubeconfigDir || '', hint: 'например ' + exampleDir() },
       { key: 'lang', label: 'Язык / Language', value: UILANG, choice: [{ v: 'ru', label: 'Русский' }, { v: 'en', label: 'English' }] },
     ],
     buttons: [
@@ -731,6 +747,7 @@ function submitSettings(f) {
   const raw = String(fval(f, 'dir')).trim().replace(/^"|"$/g, '');
   let dir = '';
   if (raw) {
+    if (foreignPath(raw)) return fail(f, 'Это путь от другой ОС — укажите путь для этой системы');
     dir = path.resolve(expandHome(raw));
     let ok = false;
     try { ok = fs.statSync(dir).isDirectory(); } catch (_) {}
@@ -744,11 +761,13 @@ function submitSettings(f) {
 function openKubeDirForm() {
   const f = {
     title: 'Папка с kubeconfig-файлами', focus: 0, err: '',
-    fields: [{ key: 'dir', label: 'Путь к папке', value: db.kubeconfigDir || '', hint: 'например C:\\Users\\me\\kube' }],
+    fields: [{ key: 'dir', label: 'Путь к папке', value: db.kubeconfigDir || '', hint: 'например ' + exampleDir() }],
     buttons: [
       { key: 'Enter', label: 'Сохранить', fn: () => {
-        const dir = path.resolve(expandHome(String(fval(f, 'dir')).trim().replace(/^"|"$/g, '')));
-        if (!String(fval(f, 'dir')).trim()) return fail(f, 'Укажите путь к папке');
+        const typed = String(fval(f, 'dir')).trim().replace(/^"|"$/g, '');
+        if (!typed) return fail(f, 'Укажите путь к папке');
+        if (foreignPath(typed)) return fail(f, 'Это путь от другой ОС — укажите путь для этой системы');
+        const dir = path.resolve(expandHome(typed));
         let ok = false;
         try { ok = fs.statSync(dir).isDirectory(); } catch (_) {}
         if (!ok) return fail(f, 'Такой папки нет: ' + dir);
@@ -2053,4 +2072,5 @@ process.on('uncaughtException', e => {
   process.exit(1);
 });
 db.services.filter(s => s.autostart).forEach(start);
+if (RESET_PATHS) flash('пути к kubeconfig от другой ОС сброшены — выберите папку в настройках (O)');
 render();
