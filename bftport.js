@@ -1403,10 +1403,10 @@ setInterval(() => { if (ui.tab === 'cluster' && ui.mode === 'list' && !ui.search
 function renderCluster(rows) {
   const P = ui.pods, ps = podsVisible();
   const nsW = Math.max(10, Math.min(24, Math.floor(W * 0.16)));
-  const nameW = Math.max(12, W - (1 + 3 + nsW + 1) - 7 - 17 - 5 - 7 - 10);
+  const nameW = Math.max(12, W - (1 + 3 + nsW + 1) - 7 - 17 - 5 - 8 - 10);
   const h = new Row(2);
   h.add('    ', C.head).add(trunc('NAMESPACE', nsW) + ' ', C.head).add(trunc(tr('ИМЯ'), nameW) + ' ', C.head).add(trunc('READY', 6) + ' ', C.head)
-    .add(trunc(tr('СТАТУС'), 16) + ' ', C.head).add(trunc(tr('РЕСТ'), 4) + ' ', C.head).add(trunc(tr('ВОЗРАСТ'), 6) + ' ', C.head).add(tr('ПРОБРОС'), C.head).fill(C.head);
+    .add(trunc(tr('СТАТУС'), 16) + ' ', C.head).add(trunc(tr('РЕСТ'), 4) + ' ', C.head).add(trunc(tr('ВОЗРАСТ'), 7) + ' ', C.head).add(tr('ПРОБРОС'), C.head).fill(C.head);
   rows.push(h);
   const logH = Math.max(3, Math.min(10, Math.floor(H * 0.3)));
   const listH = Math.max(3, H - 6 - logH);
@@ -1432,7 +1432,7 @@ function renderCluster(rows) {
       .add(trunc(p.ns, nsW) + ' ', C.dim + bg, click, true).add(trunc(p.name, nameW) + ' ', C.bold + bg, click, true)
       .add(trunc(`${p.ready}/${p.total}`, 6) + ' ', (p.ready === p.total ? '' : C.yellow) + bg, click)
       .add(trunc(p.status, 16) + ' ', col + bg, click).add(trunc(String(p.restarts), 4) + ' ', (p.restarts ? C.yellow : C.gray) + bg, click)
-      .add(trunc(p.age, 6) + ' ', C.gray + bg, click)
+      .add(trunc(p.age, 7) + ' ', C.gray + bg, click)
       .add(trunc(fw ? fw.text : '', Math.max(0, W - row.x)), (!fw || fw.status === 'stopped' ? C.gray : fw.status === 'error' ? C.red : fw.status === 'running' ? C.green : C.yellow) + bg, click);
     row.fill(bg); rows.push(row);
   }
