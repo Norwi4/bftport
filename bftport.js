@@ -546,7 +546,7 @@ function renderList() {
   const running = allSvcs().filter(s => rt(s).status === 'running').length;
   const activeN = allSvcs().filter(isActive).length;
   const t = new Row(0);
-  t.add(` ⇄ Port Forwards v${VERSION} `, C.title).add(` ${db.services.length} сервисов · ${running} работает `, C.title);
+  t.add(` ⇄ BFTPort v${VERSION} `, C.title).add(` ${db.services.length} сервисов · ${running} работает `, C.title);
   const kc = db.kubeconfig ? '⎈ ' + path.basename(db.kubeconfig) + ' ▾' : 'kubeconfig не выбран (K)';
   const right = ` ${kc} `;
   const fl_ = Date.now() < ui.flashUntil ? tr(' ⚠ ' + ui.flash + ' ') : '';

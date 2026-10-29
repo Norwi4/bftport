@@ -2,6 +2,11 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/), версии — [SemVer](https://semver.org/lang/ru/).
 
+## [1.4.4] — 2026-10-30
+
+### Изменено
+- В заголовке приложения вместо «Port Forwards» теперь «BFTPort».
+
 ## [1.4.3] — 2026-10-30
 
 ### Изменено
