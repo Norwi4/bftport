@@ -192,7 +192,7 @@ const ui = {
   gsel: 0, goff: 0,    // выбранный шаблон на вкладке «Шаблоны»
   query: '', searching: false,
   lastClick: { id: null, t: 0 },
-  flash: '',
+  flash: '', flashUntil: 0,
 };
 let W = 80, H = 24, hits = [];
 
@@ -377,7 +377,7 @@ function renderGroups(rows) {
     const row = new Row(3 + i), g = gs[ui.goff + i];
     if (!g) {
       if (!gs.length && i === 1) {
-        if (!db.groups.length) row.add('  Шаблонов нет. ', C.dim).add(' A ', C.key, () => openGroupForm()).add(' создать вручную или ', C.dim).add(' G ', C.key, () => saveRunningAsGroup()).add(' на вкладке «Все» — сохранить запущенные', C.dim);
+        if (!db.groups.length) row.add('  Шаблонов нет. ', C.dim).add(' A ', C.key, () => openGroupForm()).add(' создать вручную или ', C.dim).add(' G ', C.key, () => saveRunningAsGroup()).add(' на вкладке «Избранное» — сохранить запущенные', C.dim);
         else row.add('  Ничего не найдено по запросу', C.dim);
       }
       row.fill(); rows.push(row); continue;
@@ -461,13 +461,15 @@ function renderList() {
   t.add(` ⇄ Port Forwards v${VERSION} `, C.title).add(` ${db.services.length} сервисов · ${running} работает `, C.title);
   const kc = db.kubeconfig ? '⎈ ' + path.basename(db.kubeconfig) + ' ▾' : 'kubeconfig не выбран (K)';
   const right = ` ${kc} `;
+  const fl_ = Date.now() < ui.flashUntil ? ' ⚠ ' + ui.flash + ' ' : '';
+  if (fl_ && W - t.x > right.length + 4) t.add(fl_.slice(0, W - t.x - right.length - 1), '\x1b[1;93;48;5;25m');
   if (W - t.x > right.length) t.add(' '.repeat(W - t.x - right.length), C.title).add(right, C.title, () => switchKubeconfig());
   t.fill(C.title); rows.push(t);
 
   const tb = new Row(1);
   const tab = (id, label) => tb.add(` ${label} `, ui.tab === id ? C.key : C.btn, () => { ui.tab = id; ui.sel = 0; ui.off = 0; ui.gsel = 0; ui.goff = 0; ui.psel = 0; ui.poff = 0; ui.pkey = ''; if (id === 'cluster') refreshPods(); draw(); }).add(' ');
   tb.add(' ');
-  tab('all', `1 Все (${db.services.length})`); tab('running', `2 Запущенные (${activeN})`); tab('groups', `3 Шаблоны (${db.groups.length})`); tab('cluster', `4 Кластер (${ui.pods.at ? ui.pods.list.length : '…'})`);
+  tab('all', `1 Избранное (${db.services.length})`); tab('running', `2 Запущенные (${activeN})`); tab('groups', `3 Шаблоны (${db.groups.length})`); tab('cluster', `4 Кластер (${ui.pods.at ? ui.pods.list.length : '…'})`);
   tb.add('  ');
   const goSearch = () => { ui.searching = true; draw(); };
   tb.add(' ⌕ ', ui.searching ? C.inputF : C.input, goSearch);
@@ -499,7 +501,7 @@ function renderList() {
     if (!s) {
       if (!svcs.length && i === 1) {
         if (!db.services.length) row.add('  Пока пусто. Нажмите ', C.dim).add(' A ', C.key, () => openServiceForm()).add(' чтобы добавить сервис', C.dim);
-        else row.add(ui.query ? '  Ничего не найдено по запросу' : '  Нет запущенных сервисов — выберите вкладку «Все» и нажмите Enter', C.dim);
+        else row.add(ui.query ? '  Ничего не найдено по запросу' : '  Нет запущенных сервисов — выберите вкладку «Избранное» и нажмите Enter', C.dim);
       }
       row.fill(); rows.push(row); continue;
     }
@@ -603,20 +605,21 @@ function closeForm() { ui.form = null; ui.mode = 'list'; draw(); }
 const fval = (f, k) => f.fields.find(x => x.key === k).value;
 const fset = (f, k, v) => { const fl = f.fields.find(x => x.key === k); fl.value = v; fl.pos = undefined; };
 
-function openServiceForm(s) {
+function openServiceForm(s, preset) {
+  const src = s || preset; // preset — заготовка для нового сервиса (например, из вкладки «Кластер»)
   const isNew = !s;
   const last = db.services[db.services.length - 1];
   const f = {
-    title: isNew ? 'Новый сервис' : `Изменить: ${s.name}`,
+    title: s ? `Изменить: ${s.name}` : preset ? 'Добавить в избранное' : 'Новый сервис',
     focus: 0, err: '',
     fields: [
-      { key: 'name', label: 'Имя', value: s ? s.name : '' },
-      { key: 'namespace', label: 'Namespace', value: s ? s.namespace : (last ? last.namespace : '') },
-      { key: 'service', label: 'Service', value: s ? s.service : '' },
-      { key: 'localPort', label: 'Локальный порт', value: s ? String(s.localPort) : '', digits: true },
-      { key: 'remotePort', label: 'Порт сервиса', value: s ? String(s.remotePort) : 'grpc', hint: 'имя порта (grpc) или номер' },
-      { key: 'kubeconfig', label: 'Kubeconfig', value: s ? (s.kubeconfig || '') : '', hint: 'пусто = общий' },
-      { key: 'autostart', label: 'Автозапуск', value: s ? !!s.autostart : false, bool: true },
+      { key: 'name', label: 'Имя', value: src ? src.name : '' },
+      { key: 'namespace', label: 'Namespace', value: src ? src.namespace : (last ? last.namespace : '') },
+      { key: 'service', label: 'Service', value: src ? src.service : '' },
+      { key: 'localPort', label: 'Локальный порт', value: src ? String(src.localPort) : '', digits: true },
+      { key: 'remotePort', label: 'Порт сервиса', value: src ? String(src.remotePort) : 'grpc', hint: 'имя порта (grpc) или номер' },
+      { key: 'kubeconfig', label: 'Kubeconfig', value: src ? (src.kubeconfig || '') : '', hint: 'пусто = общий' },
+      { key: 'autostart', label: 'Автозапуск', value: src ? !!src.autostart : false, bool: true },
     ],
     buttons: [
       { key: 'Enter', label: 'Сохранить', fn: () => submitService(f, s) },
@@ -624,6 +627,7 @@ function openServiceForm(s) {
       { key: 'Esc', label: 'Отмена', fn: closeForm },
     ],
   };
+  if (preset && preset.note) f.info = () => preset.note;
   openForm(f);
 }
 function submitService(f, s) {
@@ -932,6 +936,50 @@ const podKey = p => p.ns + '/' + p.name;
 function podSvc(p) {
   return eph.get(podKey(p)) || { id: 'pod:' + podKey(p), name: p.name, namespace: p.ns, service: p.name, kind: 'pod', kubeconfig: '', localPort: 0, remotePort: 0 };
 }
+function flash(msg) {
+  ui.flash = msg; ui.flashUntil = Date.now() + 7000;
+  draw(); setTimeout(draw, 7100);
+}
+// Под эфемерен, а в избранное попадают сервисы: находим Service, который выбирает этот под (selector ⊆ labels пода),
+// и заполняем форму его настройками — имя, namespace, порт сервиса и свободный локальный порт.
+async function podToFavorite(p) {
+  if (!db.kubeconfig) return switchKubeconfig();
+  const d = await getDetail(p);
+  if (!d) { const e = podDet.get(podKey(p)); return flash('не удалось получить данные пода: ' + ((e && e.err) || 'нет ответа')); }
+  let items;
+  try { items = (await kube(db.kubeconfig, ['-n', p.ns, 'get', 'svc', '-o', 'json'])).items; }
+  catch (e) { return flash('не удалось получить сервисы: ' + e.message); }
+  const labels = d.labels || {};
+  const match = items.filter(i => {
+    const sel = (i.spec && i.spec.selector) || {}, keys = Object.keys(sel);
+    return keys.length && keys.every(k => labels[k] === sel[k]) && (i.spec.ports || []).length;
+  });
+  if (!match.length) return flash(`у пода нет Service в namespace ${p.ns} — в избранное добавляются сервисы`);
+  let svc = match[0];
+  if (match.length > 1) {
+    svc = await pick(`Service пода ${p.name}`, match.map(i => ({ label: `${db.services.some(x => x.namespace === p.ns && x.service === i.metadata.name) ? '★ ' : '  '}${i.metadata.name.padEnd(36)} ${(i.spec.ports || []).map(x => (x.name ? x.name + ':' : '') + x.port).join('  ')}${db.services.some(x => x.namespace === p.ns && x.service === i.metadata.name) ? '   (уже в избранном)' : ''}`, value: i })));
+    if (!svc) return;
+  }
+  const have = db.services.find(x => x.namespace === p.ns && x.service === svc.metadata.name);
+  if (have) {
+    ui.tab = 'all'; ui.query = ''; ui.sel = Math.max(0, db.services.indexOf(have)); ui.off = 0;
+    flash(`«${have.name}» уже в избранном`); return draw();
+  }
+  let port = svc.spec.ports[0];
+  if (svc.spec.ports.length > 1) {
+    port = await pick(`Порт сервиса ${svc.metadata.name}`, svc.spec.ports.map(x => ({ label: `${x.name || '(без имени)'}  ${x.port}/${x.protocol || 'TCP'} → ${x.targetPort}`, value: x })));
+    if (!port) return;
+  }
+  const used = new Set(allSvcs().filter(x => x.localPort).map(x => Number(x.localPort)));
+  let local = port.port;
+  while (used.has(local) && local < 65535) local++;
+  const taken = db.services.some(x => x.name === svc.metadata.name);
+  openServiceForm(null, {
+    name: taken ? `${svc.metadata.name}-${p.ns}` : svc.metadata.name, namespace: p.ns, service: svc.metadata.name,
+    localPort: local, remotePort: port.name || String(port.port), kubeconfig: '', autostart: false,
+    note: `Заполнено по поду ${p.name} (service ${svc.metadata.name}). Проверьте и нажмите Enter.`,
+  });
+}
 function podRecord(i) {
   const st = i.status || {}, spec = i.spec || {}, md = i.metadata || {};
   const cs = st.containerStatuses || [], ics = st.initContainerStatuses || [];
@@ -955,7 +1003,7 @@ function podRecord(i) {
     ready: cs.filter(c => c.ready).length, total: containers.length,
     restarts: cs.reduce((a, c) => a + (c.restartCount || 0), 0),
     created: md.creationTimestamp || '', start: st.startTime || '', node: spec.nodeName || '', ip: st.podIP || '',
-    containers: containers.map(c => c.name), ports,
+    containers: containers.map(c => c.name), ports, labels: md.labels || {},
   };
 }
 function podColor(p) {
@@ -1098,6 +1146,7 @@ function renderCluster(rows) {
   const btns = [
     { key: 'Enter', label: fs2 && isActive(fs2) ? 'Стоп проброса' : 'Проброс порта', fn: () => podAction() },
     { key: 'L', label: 'Логи', fn: () => cur && openPodLogs(cur) },
+    { key: 'F', label: 'В избранное', fn: () => cur && podToFavorite(cur) },
     { key: 'N', label: 'Namespace', fn: () => chooseNamespace() },
     { key: 'R', label: 'Обновить', fn: () => refreshPods() },
     { key: '/', label: 'Поиск', fn: () => { ui.searching = true; draw(); } },
@@ -1630,6 +1679,7 @@ function onKey(e) {
     if (ch === 'l' && pd) return openPodLogs(pd);
     if (ch === 'n') return chooseNamespace();
     if (ch === 'r') refreshPods();
+    if (ch === 'f' && pd) return podToFavorite(pd);
   } else {
     const cur = curSvc();
     if (ch === 'a') return openServiceForm();
@@ -1715,10 +1765,10 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   /  или Ctrl+F  поиск (имя, namespace, service, порт, статус); Esc — сбросить
   Во всех полях ввода: ←→ Home End Del — курсор, Ctrl+←/→ — по словам, Ctrl+W — слово назад,
   Ctrl+U — очистить, Ctrl+V / Shift+Insert — вставить из буфера обмена
-  1 2 3 / Tab    вкладки: Все, Запущенные, Шаблоны
+  1 2 3 4 / Tab  вкладки: Избранное, Запущенные, Шаблоны, Кластер
   G              сохранить запущенные сервисы как шаблон
   4 Кластер      все поды кластера без ручного добавления (только просмотр): поиск, проброс порта
-                 пода (Enter), логи (L), смена namespace (N), обновление (R)
+                 пода (Enter), логи (L), в избранное (F), смена namespace (N), обновление (R)
   K              выбор kubeconfig из папки (F2 в списке — сменить папку)
   Q / Ctrl+C     выход (пробросы останавливаются)
 
