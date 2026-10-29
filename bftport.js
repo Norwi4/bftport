@@ -163,17 +163,22 @@ function killAll() {
   if (ui.lv && ui.lv.proc) try { ui.lv.proc.kill(); } catch (_) {}
 }
 
-function kube(kc, args) {
+function kubeText(kc, args, timeout = 30000) {
   return new Promise((resolve, reject) => {
     try { assertReadOnly(args); } catch (e) { return reject(e); }
     const a = [...args];
     if (kc) a.push('--kubeconfig=' + kc);
-    execFile('kubectl', a, { windowsHide: true, maxBuffer: 32 << 20, timeout: 30000 }, (err, out, errOut) => {
-      if (err) return reject(new Error((errOut || err.message).trim().split('\n')[0]));
-      try { resolve(JSON.parse(out)); } catch (e) { reject(e); }
+    execFile('kubectl', a, { windowsHide: true, maxBuffer: 256 << 20, timeout, encoding: 'utf8' }, (err, out, errOut) => {
+      if (err) {
+        if (err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return reject(new Error('ответ кластера слишком большой — сузьте выборку (N — namespace)'));
+        if (err.killed) return reject(new Error(`kubectl не ответил за ${Math.round(timeout / 1000)} с`));
+        return reject(new Error((errOut || err.message).trim().split('\n')[0]));
+      }
+      resolve(out);
     });
   });
 }
+const kube = (kc, args) => kubeText(kc, args).then(JSON.parse);
 
 // ───────────────────────── UI-состояние ─────────────────────────
 const ui = {
@@ -960,20 +965,57 @@ function podColor(p) {
   if (p.status === 'Running') return p.ready === p.total ? C.green : C.yellow;
   return '';
 }
-function fmtAgeShort(iso) {
-  const d = new Date(iso);
-  if (!iso || isNaN(d)) return '';
-  const sec = Math.max(0, Math.round((Date.now() - d) / 1000));
-  return sec < 60 ? `${sec}с` : sec < 3600 ? `${Math.floor(sec / 60)}м` : sec < 172800 ? `${Math.floor(sec / 3600)}ч` : `${Math.floor(sec / 86400)}д`;
-}
 function podsVisible() {
   const terms = ui.query.toLowerCase().split(/\s+/).filter(Boolean);
   if (!terms.length) return ui.pods.list;
   return ui.pods.list.filter(p => { const h = (p.ns + ' ' + p.name + ' ' + p.status).toLowerCase(); return terms.every(t => h.includes(t)); });
 }
+const noneToEmpty = v => (!v || v === '<none>') ? '' : v;
+// Колонки kubectl разделены минимум тремя пробелами, а внутри значений (например «3 (2h ago)») пробел одиночный.
+function parsePodTable(txt, withNs, ns) {
+  const out = [];
+  for (const line of txt.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const c = line.trim().split(/\s{2,}/), i = withNs ? 1 : 0;
+    const m = /^(\d+)\/(\d+)$/.exec(c[i + 1] || '');
+    if (!m) continue; // служебные строки вроде «No resources found»
+    out.push({
+      ns: withNs ? c[0] : ns, name: c[i], ready: +m[1], total: +m[2], status: c[i + 2] || '',
+      restartsText: c[i + 3] || '0', restarts: parseInt(c[i + 3], 10) || 0, age: c[i + 4] || '',
+      ip: noneToEmpty(c[i + 5]), node: noneToEmpty(c[i + 6]),
+    });
+  }
+  return out;
+}
+// Подробности выбранного пода (контейнеры, порты, время создания) — одним небольшим запросом и с кэшем.
+const podDet = new Map(); // ns/name -> { at, d, err, loading }
+let detTimer = null;
+const detailOf = p => { const e = podDet.get(podKey(p)); return e && e.d; };
+function wantDetail(p) {
+  if (!p) return;
+  const e = podDet.get(podKey(p));
+  if (e && (e.loading || Date.now() - e.at < 30000)) return;
+  clearTimeout(detTimer);
+  detTimer = setTimeout(() => loadDetail(p), 200);
+}
+async function loadDetail(p) {
+  const e = { at: Date.now(), d: null, err: '', loading: true };
+  podDet.set(podKey(p), e);
+  try { e.d = podRecord(await kube(db.kubeconfig, ['-n', p.ns, 'get', 'pod', p.name, '-o', 'json'])); }
+  catch (er) { e.err = er.message; }
+  finally { e.loading = false; e.at = Date.now(); draw(); }
+}
+async function getDetail(p) {
+  let e = podDet.get(podKey(p));
+  if (e && e.loading) { while (e.loading) await new Promise(r => setTimeout(r, 40)); return e.d; }
+  if (!e || !e.d || Date.now() - e.at > 30000) { await loadDetail(p); e = podDet.get(podKey(p)); }
+  return e.d;
+}
+
 function resetPods(keepNs) {
   const P = ui.pods;
-  ui.pods = { list: [], at: 0, err: '', loading: false, ns: keepNs ? P.ns : '', gen: P.gen + 1 };
+  ui.pods = { list: [], at: 0, err: '', loading: false, ns: keepNs ? P.ns : '', gen: P.gen + 1, dur: 0 };
+  podDet.clear();
   ui.psel = 0; ui.poff = 0; ui.pkey = '';
   if (ui.tab === 'cluster') refreshPods();
 }
@@ -984,16 +1026,20 @@ async function refreshPods() {
   if (!kc) { P.err = 'kubeconfig не выбран — нажмите K'; P.list = []; return draw(); }
   P.loading = true; const gen = P.gen; draw();
   try {
-    const d = await kube(kc, ['get', 'pods', ...(P.ns ? ['-n', P.ns] : ['-A']), '-o', 'json']);
+    // Таблица считается на стороне API-сервера (как в обычном «kubectl get pods»): в десятки раз меньше данных, чем JSON.
+    // Контейнеры и порты выбранного пода подгружаются отдельно (loadDetail).
+    const t0 = Date.now();
+    const txt = await kubeText(kc, ['get', 'pods', ...(P.ns ? ['-n', P.ns] : ['-A']), '-o', 'wide', '--no-headers'], 90000);
     if (gen !== P.gen) return;
-    P.list = d.items.map(podRecord).sort((a, b) => a.ns.localeCompare(b.ns) || a.name.localeCompare(b.name));
-    P.err = ''; P.at = Date.now();
+    P.list = parsePodTable(txt, !P.ns, P.ns).sort((a, b) => a.ns.localeCompare(b.ns) || a.name.localeCompare(b.name));
+    P.err = ''; P.at = Date.now(); P.dur = P.at - t0;
     const i = podsVisible().findIndex(x => podKey(x) === ui.pkey); // выбор «прилипает» к поду, а не к номеру строки
     if (i >= 0) ui.psel = i;
   } catch (e) { if (gen === P.gen) P.err = e.message; }
   finally { if (gen === P.gen) { P.loading = false; draw(); } }
 }
-setInterval(() => { if (ui.tab === 'cluster' && ui.mode === 'list' && !ui.searching) refreshPods(); }, 8000);
+// на большом кластере не дёргаем API-сервер часто: пауза между обновлениями растёт вместе со временем загрузки
+setInterval(() => { if (ui.tab === 'cluster' && ui.mode === 'list' && !ui.searching && Date.now() - ui.pods.at > Math.max(8000, (ui.pods.dur || 0) * 8)) refreshPods(); }, 4000);
 
 function renderCluster(rows) {
   const P = ui.pods, ps = podsVisible();
@@ -1010,6 +1056,7 @@ function renderCluster(rows) {
   if (ui.psel >= ui.poff + listH) ui.poff = ui.psel - listH + 1;
   const cur = ps[ui.psel];
   ui.pkey = cur ? podKey(cur) : '';
+  wantDetail(cur);
   for (let i = 0; i < listH; i++) {
     const row = new Row(3 + i), p = ps[ui.poff + i];
     if (!p) {
@@ -1027,7 +1074,7 @@ function renderCluster(rows) {
       .add(trunc(p.ns, nsW) + ' ', C.dim + bg, click).add(trunc(p.name, nameW) + ' ', C.bold + bg, click)
       .add(trunc(`${p.ready}/${p.total}`, 6) + ' ', (p.ready === p.total ? '' : C.yellow) + bg, click)
       .add(trunc(p.status, 16) + ' ', col + bg, click).add(trunc(String(p.restarts), 4) + ' ', (p.restarts ? C.yellow : C.gray) + bg, click)
-      .add(trunc(fmtAgeShort(p.created), 6) + ' ', C.gray + bg, click)
+      .add(trunc(p.age, 6) + ' ', C.gray + bg, click)
       .add(trunc(fwd, Math.max(0, W - row.x)), (fr && fr.status === 'error' ? C.red : fr && fr.status === 'running' ? C.green : C.yellow) + bg, click);
     row.fill(bg); rows.push(row);
   }
@@ -1037,11 +1084,14 @@ function renderCluster(rows) {
     .add(` ${ps.length}/${P.list.length} подов · ${nsLabel} · обновлено ${upd}${P.loading ? ' · обновление…' : ''} · только просмотр `, C.head).fill(C.head));
   const det = [];
   if (cur) {
-    det.push(`узел: ${cur.node || '—'}   IP: ${cur.ip || '—'}   создан: ${fmtStart(cur.created) || '—'}   перезапусков: ${cur.restarts}`);
-    for (const c of cur.containers) {
-      const ports = cur.ports.filter(x => x.container === c).map(x => `${x.port}/${x.protocol}${x.name ? ' (' + x.name + ')' : ''}`);
-      det.push(`• ${c}   ${ports.length ? 'порты: ' + ports.join(', ') : 'порты не объявлены'}`);
-    }
+    const e = podDet.get(podKey(cur)), d = e && e.d;
+    det.push(`узел: ${cur.node || '—'}   IP: ${cur.ip || '—'}   возраст: ${cur.age}   перезапусков: ${cur.restartsText}${d && d.created ? '   создан: ' + fmtStart(d.created) : ''}`);
+    if (d) {
+      for (const c of d.containers) {
+        const ports = d.ports.filter(x => x.container === c).map(x => `${x.port}/${x.protocol}${x.name ? ' (' + x.name + ')' : ''}`);
+        det.push(`• ${c}   ${ports.length ? 'порты: ' + ports.join(', ') : 'порты не объявлены'}`);
+      }
+    } else det.push(e && e.err ? 'не удалось получить подробности: ' + e.err : 'загрузка подробностей…');
   }
   for (let i = 0; i < logH; i++) rows.push(new Row(4 + listH + i).add(det[i] ? ' ' + det[i] : '', i === 0 ? '' : C.dim).fill());
   const fs2 = cur && eph.get(podKey(cur));
@@ -1087,9 +1137,10 @@ function podAction() {
   if (s && isActive(s)) { stop(s); return draw(); }
   openPodForward(p);
 }
-function openPodForward(p) {
+async function openPodForward(p) {
+  const d = await getDetail(p), ports = d ? d.ports : [];
   const used = new Set(allSvcs().filter(x => x.localPort).map(x => Number(x.localPort)));
-  const remote = p.ports.length ? p.ports[0].port : '';
+  const remote = ports.length ? ports[0].port : '';
   let local = remote || '';
   while (local && used.has(Number(local)) && local < 65535) local++;
   const f = {
@@ -1100,17 +1151,17 @@ function openPodForward(p) {
     ],
     buttons: [
       { key: 'Enter', label: 'Пробросить', fn: () => submitPodForward(f, p) },
-      { key: 'F2', label: 'Выбрать порт пода', fn: () => choosePodPort(f, p) },
+      { key: 'F2', label: 'Выбрать порт пода', fn: () => choosePodPort(f, p, ports) },
       { key: 'Esc', label: 'Отмена', fn: closeForm },
     ],
     submit: () => submitPodForward(f, p),
   };
-  f.info = () => p.ports.length ? 'Порты пода: ' + p.ports.map(x => `${x.port}${x.name ? '(' + x.name + ')' : ''}/${x.protocol}`).join(', ') : 'У пода порты не объявлены — укажите порт вручную';
+  f.info = () => ports.length ? 'Порты пода: ' + ports.map(x => `${x.port}${x.name ? '(' + x.name + ')' : ''}/${x.protocol}`).join(', ') : 'У пода порты не объявлены — укажите порт вручную';
   openForm(f);
 }
-async function choosePodPort(f, p) {
-  if (!p.ports.length) { f.err = 'У пода нет объявленных портов'; return draw(); }
-  const items = p.ports.map(x => ({ label: `${x.port}/${x.protocol}  ${x.name || ''}  (контейнер ${x.container})`, value: x.port }));
+async function choosePodPort(f, p, ports) {
+  if (!ports.length) { f.err = 'У пода нет объявленных портов'; return draw(); }
+  const items = ports.map(x => ({ label: `${x.port}/${x.protocol}  ${x.name || ''}  (контейнер ${x.container})`, value: x.port }));
   const v = await pick(`Порт пода ${p.name}`, items);
   if (v) { fset(f, 'rport', String(v)); if (!String(fval(f, 'lport')).trim()) fset(f, 'lport', String(v)); }
   draw();
@@ -1128,10 +1179,10 @@ function submitPodForward(f, p) {
 }
 // Логи пода: тот же просмотр, что и для сервиса, но без выбора пода — выбран конкретный
 function openPodLogs(p) {
-  const s = podSvc(p);
+  const s = podSvc(p), d = detailOf(p);
   ui.lv = { svc: s, src: 'pod', pod: [], scroll: 0, filter: '', searching: false, wrap: true, proc: null, timer: null, closed: false,
     gen: 0, retries: 0, endedAt: 0, msg: 'подключение…', selector: '', carryO: '', carryE: '',
-    mode: 'one', podName: p.name, podInfo: { name: p.name, start: p.start, phase: p.status, container: '', containers: p.containers.length },
+    mode: 'one', podName: p.name, podInfo: { name: p.name, start: d ? d.start : '', phase: p.status, container: '', containers: d ? d.containers.length : 0 },
     podCount: 1, fmt: true, fmtGen: 0, container: '' };
   ui.mode = 'logs';
   podLogsStart(ui.lv); draw();
