@@ -111,8 +111,8 @@ const PHRASES = [
   ['у сервиса один под, выбирать не из чего', 'the service has a single pod, nothing to choose'], ['в поде один контейнер', 'the pod has a single container'],
   ['↻ под заменён: ', '↻ pod replaced: '], ['под недоступен (возможно, удалён) · ', 'pod unavailable (possibly deleted) · '],
   [' — повтор…', ' — retrying…'],
-  [' колесо / PgUp / PgDn / Home / End — прокрутка · E — экспорт · в поиске: ↑↓ Enter F3 — совпадения, Tab — подсветка/фильтр, Ctrl+R — regex, Ctrl+S — экспорт, Esc — закрыть',
-    ' wheel / PgUp / PgDn / Home / End — scroll · E — export · in search: ↑↓ Enter F3 — matches, Tab — highlight/filter, Ctrl+R — regex, Ctrl+S — export, Esc — close'],
+  [' колесо / PgUp / PgDn / Home / End — прокрутка · мышь — выделение, Ctrl+C — копировать · E — экспорт · в поиске: ↑↓ Enter F3 — совпадения, Tab — подсветка/фильтр, Ctrl+R — regex, Ctrl+S — экспорт, Esc — закрыть',
+    ' wheel / PgUp / PgDn / Home / End — scroll · mouse — select, Ctrl+C — copy · E — export · in search: ↑↓ Enter F3 — matches, Tab — highlight/filter, Ctrl+R — regex, Ctrl+S — export, Esc — close'],
   ['некорректное выражение: ', 'invalid expression: '],
   ['Экспорт логов пода', 'Export pod logs'], ['Экспорт: все логи пода', 'Export: all pod logs'], ['Экспорт: видимые логи', 'Export: visible logs'], ['Экспорт', 'Export'],
   ['Видимые: на экране (', 'Visible: on screen ('], [', с фильтром', ', filtered'],
@@ -125,6 +125,8 @@ const PHRASES = [
   ['экспорт доступен для логов конкретного пода (P — выбрать под)', "export is available for a specific pod's logs (P — choose a pod)"],
   ['экспорт уже идёт', 'an export is already running'],
   ['код ', 'code '],
+  [' ⧉ выделено: ', ' ⧉ selected: '], [' симв. · Ctrl+C ', ' chars · Ctrl+C '], ['скопировано: ', 'copied: '], [' символов', ' characters'],
+  ['не удалось скопировать средствами ОС, текст отправлен терминалу (OSC 52)', 'could not copy via the OS; the text was sent to the terminal (OSC 52)'],
   ['Пароль sudo', 'sudo password'], ['Пароль', 'Password'], ['Продолжить', 'Continue'], ['Введите пароль', 'Enter the password'],
   ['Сервис «', 'Service «'], ['», локальный порт ', '», local port '],
   ['Порт ниже 1024 на Linux доступен только root: для проброса нужен sudo.', 'On Linux ports below 1024 can be bound only by root: forwarding needs sudo.'],
@@ -191,6 +193,7 @@ KEYS (work on the Russian layout too; almost everything is clickable)
      counter, ↑↓/Enter/F3 — through matches; Tab — «filter» mode), W — wrap,
      F — format: JSON logs are rendered with the logback pattern (~/.m2/logback-local.xml),
      Ctrl+R in search — regular expressions, E (Ctrl+S in search) — export the pod's logs to a file (visible / all)
+     Mouse — select text (double click — word, triple click — line), Ctrl+C — copy
   /  or Ctrl+F  search (name, namespace, service, port, status); Esc — clear
   In all input fields: ←→ Home End Del — cursor, Ctrl+←/→ — by words, Ctrl+W — delete word,
   Ctrl+U — clear, Ctrl+V / Shift+Insert — paste from the clipboard

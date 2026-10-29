@@ -672,7 +672,7 @@ function quit() { allSvcs().some(isActive) ? askQuit() : exit(); }
 function closeConfirm() { ui.mode = 'list'; ui.confirm = null; draw(); }
 function exit() {
   killAll();
-  process.stdout.write('\x1b[?2004l\x1b[?1000l\x1b[?1006l\x1b[?7h\x1b[?25h\x1b[?1049l');
+  process.stdout.write('\x1b[?2004l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?7h\x1b[?25h\x1b[?1049l');
   try { process.stdin.setRawMode(false); } catch (_) {}
   process.exit(0);
 }
@@ -1425,7 +1425,7 @@ function openPodLogs(p) {
   ui.lv = { svc: s, src: 'pod', pod: [], scroll: 0, filter: '', searching: false, wrap: true, proc: null, timer: null, closed: false,
     gen: 0, retries: 0, endedAt: 0, msg: 'подключение…', selector: '', carryO: '', carryE: '',
     mode: 'one', podName: p.name, podInfo: { name: p.name, start: d ? d.start : '', phase: p.status, container: '', containers: d ? d.containers.length : 0 },
-    podCount: 1, fmt: true, fmtGen: 0, fmode: 'hl', curRef: null, regex: false, exp: null, note: '', noteUntil: 0, container: '' };
+    podCount: 1, fmt: true, fmtGen: 0, fmode: 'hl', curRef: null, regex: false, exp: null, note: '', noteUntil: 0, sel: null, drag: null, clk: null, container: '' };
   ui.mode = 'logs';
   podLogsStart(ui.lv); draw();
 }
@@ -1459,7 +1459,7 @@ function openLogs() {
   const s = curSvc(); if (!s) return;
   ui.lv = { svc: s, src: 'pod', pod: [], scroll: 0, filter: '', searching: false, wrap: true, proc: null, timer: null, closed: false,
     gen: 0, retries: 0, endedAt: 0, msg: 'подключение…', selector: '', carryO: '', carryE: '',
-    mode: null, podName: '', podInfo: null, podCount: 0, fmt: true, fmtGen: 0, fmode: 'hl', curRef: null, regex: false, exp: null, note: '', noteUntil: 0 }; // mode: null (ещё не выбрано) | 'one' | 'all'
+    mode: null, podName: '', podInfo: null, podCount: 0, fmt: true, fmtGen: 0, fmode: 'hl', curRef: null, regex: false, exp: null, note: '', noteUntil: 0, sel: null, drag: null, clk: null }; // mode: null (ещё не выбрано) | 'one' | 'all'
   ui.mode = 'logs';
   podLogsStart(ui.lv); draw();
 }
@@ -1626,7 +1626,7 @@ function lvCompile(lv) {
   return (lv._c = { key, re, err });
 }
 function lvSource(lv) {
-  const src = lv.src === 'pod' ? lv.pod.flatMap(e => viewOf(lv, e)) : rt(lv.svc).log.map(l => ({ text: l.t + ' ' + l.text, sys: l.sys }));
+  const src = lv.src === 'pod' ? lv.pod.flatMap(e => viewOf(lv, e)) : rt(lv.svc).log.map(l => l._v || (l._v = { text: l.t + ' ' + l.text, sys: l.sys }));
   if (lv.filter && lv.fmode === 'filter') {
     const { re } = lvCompile(lv);
     if (re) return src.filter(l => { re.lastIndex = 0; return re.test(l.text); });
@@ -1806,16 +1806,115 @@ function lvStep(lv, d) {
   if (cur < 0) return lvQueryChanged(lv);
   lvGoto(lv, L, F, cur + d);
 }
-function addHl(row, text, off, ranges, curK, base) {
-  let pos = 0;
-  ranges.forEach(([a0, b0], k) => {
-    const a = Math.max(a0 - off, pos), b = Math.min(b0 - off, text.length);
-    if (b <= a) return;
-    if (a > pos) row.add(text.slice(pos, a), base, undefined, true);
-    row.add(text.slice(a, b), k === curK ? HL_CUR : HL, undefined, true);
-    pos = b;
-  });
-  if (pos < text.length) row.add(text.slice(pos), base, undefined, true);
+// Метки в строке: [от, до, стиль, приоритет] в координатах всей строки; выделение (2) перекрывает совпадения поиска (1).
+function addMarked(row, text, off, marks, base, raw) {
+  const cuts = new Set([0, text.length]);
+  for (const [a0, b0] of marks) { cuts.add(Math.max(0, Math.min(text.length, a0 - off))); cuts.add(Math.max(0, Math.min(text.length, b0 - off))); }
+  const xs = [...cuts].sort((p, q) => p - q);
+  for (let k = 0; k + 1 < xs.length; k++) {
+    const s0 = xs[k], e0 = xs[k + 1];
+    if (e0 <= s0) continue;
+    let st = base, best = 0;
+    for (const [a0, b0, sty, pr] of marks) if (a0 - off <= s0 && b0 - off >= e0 && pr > best) { st = sty; best = pr; }
+    row.add(text.slice(s0, e0), st, undefined, raw);
+  }
+}
+
+// ── выделение мышью и копирование (Ctrl+C). Выделение привязано к тексту (запись + позиция в ней), а не к экрану,
+// поэтому не «уезжает» при прокрутке и притоке новых строк; перенесённая строка копируется целиком, без лишних переводов строк.
+const SEL = '\x1b[97;48;5;32m';
+function lvPointAt(lv, x, y) {
+  const L = lvLayout(lv);
+  if (!L.lines.length) return null;
+  const maxTop = Math.max(0, L.total - L.n), scroll = Math.max(0, Math.min(lv.scroll, maxTop));
+  const top = Math.max(0, maxTop - scroll), pad = Math.max(0, L.n - L.total);
+  let row = top + (y - 2) - pad;
+  row = Math.max(0, Math.min(L.total - 1, row)); // за краем (при перетаскивании) берём ближайшую строку
+  let lo = 0, hi = L.lines.length - 1;
+  while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (L.rowStart[mid] <= row) lo = mid; else hi = mid - 1; }
+  const e = L.lines[lo], off = lv.wrap ? (row - L.rowStart[lo]) * L.width : 0;
+  return { e, c: Math.max(0, Math.min(Math.max(0, e.text.length - 1), off + Math.max(0, x - 1))) };
+}
+function lvSelRange(lv, lines) {
+  const sl = lv.sel;
+  if (!sl) return null;
+  const ia = lines.indexOf(sl.a.e), ib = lines.indexOf(sl.b.e);
+  if (ia < 0 || ib < 0) return null;
+  let A = { i: ia, c: sl.a.c }, B = { i: ib, c: sl.b.c };
+  if (A.i > B.i || (A.i === B.i && A.c > B.c)) [A, B] = [B, A];
+  return { A, B: { i: B.i, c: B.c + 1 } }; // символ под концом выделения тоже входит
+}
+function lvSelText(lv, lines) {
+  const r = lvSelRange(lv, lines);
+  if (!r) return '';
+  const out = [];
+  for (let i = r.A.i; i <= r.B.i; i++) {
+    const t = lines[i].text, from = i === r.A.i ? r.A.c : 0, to = i === r.B.i ? r.B.c : t.length;
+    out.push(t.slice(from, Math.max(from, to)));
+  }
+  return out.join('\n');
+}
+const lvHasSel = lv => !!lv.sel && lvSelText(lv, lvSource(lv)).length > 0;
+function lvTokenAt(e, c) { // слово под курсором: UUID, traceId, пути — до пробела, скобок, кавычек, запятых
+  const t = e.text, ok = ch => !/[\s,;()\[\]{}"'<>|=]/.test(ch);
+  if (!t.length) return [0, 0];
+  if (!ok(t[c])) return [c, c];
+  let a0 = c, b0 = c;
+  while (a0 > 0 && ok(t[a0 - 1])) a0--;
+  while (b0 < t.length - 1 && ok(t[b0 + 1])) b0++;
+  return [a0, b0];
+}
+// true — событие обработано выделением; false — пусть обработают колесо и кнопки интерфейса
+function lvMouse(b, x, y, press) {
+  const lv = ui.lv, n = Math.max(3, H - 4);
+  if (b & 64) return false; // колесо
+  const motion = (b & 32) !== 0, btn = b & 3;
+  if (!press) { // кнопку отпустили
+    if (lv.drag) { const d = lv.drag; lv.drag = null; if (!d.moved && d.clicks === 1) lv.sel = null; draw(); return true; }
+    return false;
+  }
+  if (motion) { // перетаскивание с зажатой левой кнопкой
+    if (!lv.drag || btn !== 0) return true;
+    const pt = lvPointAt(lv, x, y);
+    if (pt && lv.sel) { lv.sel.b = pt; lv.drag.moved = true; }
+    if (y < 2) lv.scroll += 1; else if (y >= 2 + n && lv.scroll > 0) lv.scroll -= 1; // у края окна подкручиваем
+    draw(); return true;
+  }
+  if (btn !== 0) return false;
+  for (const h of hits) if (h.y === y && x >= h.x1 && x <= h.x2) return false; // нажали на кнопку интерфейса
+  if (y < 2 || y >= 2 + n) return false;
+  const pt = lvPointAt(lv, x, y);
+  if (!pt) return true;
+  const now = Date.now(), k = lv.clk && now - lv.clk.t < 450 && lv.clk.x === x && lv.clk.y === y ? Math.min(3, lv.clk.n + 1) : 1;
+  lv.clk = { t: now, x, y, n: k };
+  if (k === 1) { lv.sel = { a: pt, b: pt }; lv.drag = { moved: false, clicks: 1 }; }
+  else if (k === 2) { const [s0, e0] = lvTokenAt(pt.e, pt.c); lv.sel = { a: { e: pt.e, c: s0 }, b: { e: pt.e, c: e0 } }; lv.drag = { moved: true, clicks: 2 }; }
+  else { lv.sel = { a: { e: pt.e, c: 0 }, b: { e: pt.e, c: Math.max(0, pt.e.text.length - 1) } }; lv.drag = { moved: true, clicks: 3 }; }
+  draw(); return true;
+}
+// Буфер обмена: сначала OSC 52 (его понимают многие терминалы, в том числе по SSH), затем средства ОС.
+function copyToClipboard(text, cb) {
+  if (text.length < 70000) { try { process.stdout.write('\x1b]52;c;' + Buffer.from(text, 'utf8').toString('base64') + '\x07'); } catch (_) {} }
+  const tries = process.platform === 'win32' ? [['powershell', ['-NoProfile', '-NonInteractive', '-Command', '[Console]::InputEncoding=[Text.Encoding]::UTF8; Set-Clipboard -Value ([Console]::In.ReadToEnd())']]]
+    : process.platform === 'darwin' ? [['pbcopy', []]]
+      : [['wl-copy', []], ['xclip', ['-selection', 'clipboard']], ['xsel', ['-ib']]];
+  const next = i => {
+    if (i >= tries.length) return cb(false);
+    let p;
+    try { p = spawn(tries[i][0], tries[i][1], { stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true, env: { ...process.env, LC_CTYPE: 'UTF-8' } }); }
+    catch (_) { return next(i + 1); }
+    p.on('error', () => next(i + 1));
+    p.on('exit', code => (code === 0 ? cb(true) : next(i + 1)));
+    p.stdin.on('error', () => {});
+    p.stdin.end(text);
+  };
+  next(0);
+}
+function lvCopy(lv) {
+  const text = lvSelText(lv, lvSource(lv));
+  lv.sel = null;
+  copyToClipboard(text, ok => lvNote(lv, ok ? `скопировано: ${text.length} символов` : 'не удалось скопировать средствами ОС, текст отправлен терминалу (OSC 52)', !ok));
+  draw();
 }
 function lvStyle(l) {
   if (l.dim) return C.gray;
@@ -1850,6 +1949,8 @@ function renderLogs() {
   const F = lv.filter ? lvFind(lv, lines) : null;
   const ci = F ? lvCurIdx(lv, lines, F.list) : -1;
   const curLine = ci >= 0 ? F.list[ci].i : -1, curK = ci >= 0 ? F.list[ci].k : -1;
+  const selR = lv.sel ? lvSelRange(lv, lines) : null; // записи пропали (очистили, сменили формат) — выделение снимается
+  if (lv.sel && !selR) lv.sel = null;
 
   const tb = new Row(1).add(' ');
   const srcBtn = (id, label) => tb.add(` ${label} `, lv.src === id ? C.key : C.btn, () => { lv.src = id; lv.scroll = 0; draw(); }).add(' ');
@@ -1867,6 +1968,7 @@ function renderLogs() {
     tb.add(' .* ', lv.regex ? C.key : C.btn, () => { lv.regex = !lv.regex; lvQueryChanged(lv); draw(); });
     tb.add(lv.fmode === 'filter' ? ' фильтр (Tab) ' : ' подсветка (Tab) ', C.dim);
   }
+  if (selR) tb.add(` ⧉ выделено: ${lvSelText(lv, lines).length} симв. · Ctrl+C `, C.yellow);
   if (lv.exp) tb.add(` ⇩ экспорт: ${lv.exp.lines} строк… `, C.yellow);
   if (Date.now() < lv.noteUntil) tb.add(' ' + lv.note, lv.noteBad ? C.red : C.green);
   else if (lv.src === 'pod') tb.add(' ' + lv.msg, lv.proc ? C.gray : C.yellow);
@@ -1890,8 +1992,10 @@ function renderLogs() {
     const row = new Row(2 + i), o = out[i - (n - out.length)];
     if (o) {
       row.add(' ');
-      const rg = F && F.occ[o.i];
-      if (rg) addHl(row, o.t, o.off, rg, o.i === curLine ? curK : -1, lvStyle(o.l)); else row.add(o.t, lvStyle(o.l), undefined, !o.l.sys);
+      const marks = [], rg = F && F.occ[o.i];
+      if (rg) rg.forEach(([a0, b0], k) => marks.push([a0, b0, k === curK && o.i === curLine ? HL_CUR : HL, 1]));
+      if (selR && o.i >= selR.A.i && o.i <= selR.B.i) marks.push([o.i === selR.A.i ? selR.A.c : 0, o.i === selR.B.i ? selR.B.c : o.l.text.length, SEL, 2]);
+      if (marks.length) addMarked(row, o.t, o.off, marks, lvStyle(o.l), !o.l.sys); else row.add(o.t, lvStyle(o.l), undefined, !o.l.sys);
     }
     else if (!lines.length && i === 1) row.add(lv.src === 'pod' ? '  Ждём строки логов…' : '  В выводе port-forward пока пусто', C.gray);
     row.fill(); rows.push(row);
@@ -1912,11 +2016,13 @@ function renderLogs() {
   ];
   const br = buttonRows(H - 2, btns);
   for (const r of br) { r.fill(); rows.push(r); }
-  if (br.length < 2) rows.push(new Row(H - 1).add(' колесо / PgUp / PgDn / Home / End — прокрутка · E — экспорт · в поиске: ↑↓ Enter F3 — совпадения, Tab — подсветка/фильтр, Ctrl+R — regex, Ctrl+S — экспорт, Esc — закрыть', C.gray).fill());
+  if (br.length < 2) rows.push(new Row(H - 1).add(' колесо / PgUp / PgDn / Home / End — прокрутка · мышь — выделение, Ctrl+C — копировать · E — экспорт · в поиске: ↑↓ Enter F3 — совпадения, Tab — подсветка/фильтр, Ctrl+R — regex, Ctrl+S — экспорт, Esc — закрыть', C.gray).fill());
   return rows;
 }
 function logsKey(e) {
   const lv = ui.lv, n = Math.max(3, H - 4);
+  if ((e.k === 'ctrl-c' || e.k === 'ctrl-ins') && lvHasSel(lv)) return lvCopy(lv); // есть выделение — копируем, иначе Ctrl+C работает как раньше
+  if (e.k === 'esc' && lv.sel && !lv.searching) { lv.sel = null; return draw(); }
   if (lv.searching) {
     const was = lv.filter;
     switch (e.k) {
@@ -1969,7 +2075,7 @@ const KEYS = {
   '\x1b[A': 'up', '\x1b[B': 'down', '\x1b[C': 'right', '\x1b[D': 'left', '\x1b[H': 'home', '\x1b[F': 'end',
   '\x1b[1~': 'home', '\x1b[4~': 'end', '\x1b[3~': 'del', '\x1b[5~': 'pgup', '\x1b[6~': 'pgdn', '\x1b[Z': 'stab',
   '\x1bOQ': 'f2', '\x1b[12~': 'f2', '\x1bOA': 'up', '\x1bOB': 'down', '\x1bOH': 'home', '\x1bOF': 'end', '\x1b[7~': 'home', '\x1b[8~': 'end',
-  '\x1bOR': 'f3', '\x1b[13~': 'f3', '\x1b[1;2R': 'sf3', '\x1b[25~': 'sf3', '\x1b[1;5D': 'wleft', '\x1b[1;5C': 'wright', '\x1b[1;3D': 'wleft', '\x1b[1;3C': 'wright', '\x1b[2;2~': 'ctrl-v',
+  '\x1bOR': 'f3', '\x1b[2;5~': 'ctrl-ins', '\x1b[13~': 'f3', '\x1b[1;2R': 'sf3', '\x1b[25~': 'sf3', '\x1b[1;5D': 'wleft', '\x1b[1;5C': 'wright', '\x1b[1;3D': 'wleft', '\x1b[1;3C': 'wright', '\x1b[2;2~': 'ctrl-v',
 };
 const TOKEN = /\x1b\[<(\d+);(\d+);(\d+)([Mm])|\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1bO[A-Z]|\x1b|[\s\S]/gu;
 
@@ -2018,6 +2124,7 @@ function onTokens(str) {
   }
 }
 function onMouse(b, x, y, press) {
+  if (ui.mode === 'logs' && ui.lv && lvMouse(b, x, y, press)) return;
   if (!press) return;
   if ((b & 64) && (b & 3) < 2) { // колесо (с любыми модификаторами Shift/Alt/Ctrl)
     const up = (b & 1) === 0, d = up ? 'up' : 'down';
@@ -2184,6 +2291,7 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
      счётчик, ↑↓/Enter/F3 — по совпадениям; Tab — режим «фильтр»), W — перенос,
      F — формат: JSON-логи приводятся к шаблону logback (~/.m2/logback-local.xml),
      Ctrl+R в поиске — регулярные выражения, E (в поиске Ctrl+S) — экспорт логов пода в файл (видимые / все)
+     Мышь — выделение текста (двойной клик — слово, тройной — строка), Ctrl+C — копировать
   /  или Ctrl+F  поиск (имя, namespace, service, порт, статус); Esc — сбросить
   Во всех полях ввода: ←→ Home End Del — курсор, Ctrl+←/→ — по словам, Ctrl+W — слово назад,
   Ctrl+U — очистить, Ctrl+V / Shift+Insert — вставить из буфера обмена
@@ -2217,20 +2325,20 @@ if (!process.stdin.isTTY) { console.error('Нужен интерактивный
 
 // bftport --keys: диагностика ввода — показывает сырые байты нажатий и кликов мыши
 if (process.argv.includes('--keys')) {
-  process.stdout.write('\x1b[?1000h\x1b[?1006h\x1b[?2004h');
+  process.stdout.write('\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h');
   process.stdin.setRawMode(true);
   process.stdin.resume();
   enableConsoleMouse();
   console.log(`terminal: ${process.env.WT_SESSION ? 'Windows Terminal' : process.env.TERM_PROGRAM || 'не Windows Terminal (conhost/другой)'}`);
   console.log('Кликайте мышью и жмите клавиши. Ничего не появляется при клике — мышь не доходит. Ctrl+C — выход.\r');
   process.stdin.on('data', d => {
-    if (d.includes(3)) { process.stdout.write('\x1b[?2004l\x1b[?1000l\x1b[?1006l'); process.exit(0); }
+    if (d.includes(3)) { process.stdout.write('\x1b[?2004l\x1b[?1002l\x1b[?1000l\x1b[?1006l'); process.exit(0); }
     console.log(JSON.stringify(d.toString()) + '\r');
   });
   return;
 }
 
-process.stdout.write('\x1b[?1049h\x1b[?7l\x1b[?1000h\x1b[?1006h\x1b[?2004h');
+process.stdout.write('\x1b[?1049h\x1b[?7l\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h');
 process.stdin.setRawMode(true);
 process.stdin.resume();
 enableConsoleMouse();
@@ -2239,7 +2347,7 @@ process.stdout.on('resize', draw);
 process.on('exit', killAll);
 process.on('uncaughtException', e => {
   killAll();
-  process.stdout.write('\x1b[?2004l\x1b[?1000l\x1b[?1006l\x1b[?7h\x1b[?25h\x1b[?1049l');
+  process.stdout.write('\x1b[?2004l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?7h\x1b[?25h\x1b[?1049l');
   console.error(e);
   process.exit(1);
 });
