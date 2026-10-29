@@ -1,6 +1,6 @@
 {
   "name": "bftport",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Интерактивный менеджер kubectl port-forward",
   "bin": {
     "bftport": "bftport.js"

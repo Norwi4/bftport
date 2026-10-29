@@ -27,10 +27,11 @@ function loadDb() {
     d.services = (d.services || []).map(s => { if (s.id) return s; dirty = true; return { id: uid(), ...s }; });
     // шаблоны (группы) ссылаются на сервисы по id
     d.groups = (d.groups || []).map(g => ({ id: g.id || uid(), name: g.name, services: (g.services || []).filter(id => d.services.some(s => s.id === id)) }));
+    if (!d.kubeconfigDir && d.kubeconfig) d.kubeconfigDir = path.dirname(d.kubeconfig);
     if (dirty) writeDb(d);
     return d;
   } catch (e) {
-    return { kubeconfig: '', services: [], groups: [] };
+    return { kubeconfig: '', kubeconfigDir: '', services: [], groups: [] };
   }
 }
 function writeDb(d) {
@@ -311,7 +312,7 @@ function renderGroups(rows) {
     { key: 'E', label: 'Изменить', fn: () => cur && openGroupForm(cur) },
     { key: 'D', label: 'Удалить', fn: () => askDeleteGroup() },
     { key: '/', label: 'Поиск', fn: () => { ui.searching = true; draw(); } },
-    { key: 'K', label: 'Kubeconfig', fn: () => openKubeconfigForm() },
+    { key: 'K', label: 'Конфиг', fn: () => switchKubeconfig() },
     { key: 'Q', label: 'Выход', fn: () => quit() },
   ];
   for (const r of buttonRows(4 + listH + logH, btns)) { r.fill(); rows.push(r); }
@@ -363,9 +364,9 @@ function renderList() {
   const activeN = db.services.filter(isActive).length;
   const t = new Row(0);
   t.add(` ⇄ Port Forwards v${VERSION} `, C.title).add(` ${db.services.length} сервисов · ${running} работает `, C.title);
-  const kc = db.kubeconfig ? path.basename(db.kubeconfig) : 'kubeconfig не задан (K)';
+  const kc = db.kubeconfig ? '⎈ ' + path.basename(db.kubeconfig) + ' ▾' : 'kubeconfig не выбран (K)';
   const right = ` ${kc} `;
-  if (W - t.x > right.length) t.add(' '.repeat(W - t.x - right.length), C.title).add(right, C.title, () => openKubeconfigForm());
+  if (W - t.x > right.length) t.add(' '.repeat(W - t.x - right.length), C.title).add(right, C.title, () => switchKubeconfig());
   t.fill(C.title); rows.push(t);
 
   const tb = new Row(1);
@@ -439,7 +440,7 @@ function renderList() {
     { key: 'X', label: 'Стоп все', fn: () => { visible().forEach(stop); draw(); } },
     { key: 'G', label: 'В шаблон', fn: () => saveRunningAsGroup() },
     { key: '/', label: 'Поиск', fn: () => { ui.searching = true; draw(); } },
-    { key: 'K', label: 'Kubeconfig', fn: () => openKubeconfigForm() },
+    { key: 'K', label: 'Конфиг', fn: () => switchKubeconfig() },
     { key: 'Q', label: 'Выход', fn: () => quit() },
   ];
   const br = buttonRows(fy, btns);
@@ -546,16 +547,55 @@ function submitService(f, s) {
 }
 function fail(f, msg) { f.err = msg; draw(); }
 
-function openKubeconfigForm() {
+// kubeconfig: настраивается папка с конфигами, а конфиг выбирается из неё одним списком (K)
+const PICK_FOLDER = { folder: true };
+const sameFile = (a, b) => !!a && !!b && (process.platform === 'win32' ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b));
+const expandHome = p => p.replace(/^~(?=$|[\\/])/, require('os').homedir());
+
+function listKubeconfigs(dir) {
+  return fs.readdirSync(dir, { withFileTypes: true })
+    .filter(e => e.isFile() && !e.name.startsWith('.'))
+    .map(e => e.name).sort((x, y) => x.localeCompare(y))
+    .map(name => {
+      const full = path.join(dir, name);
+      return { label: (sameFile(full, db.kubeconfig) ? '● ' : '  ') + name, value: full };
+    });
+}
+async function switchKubeconfig() {
+  const dir = db.kubeconfigDir;
+  if (!dir || !fs.existsSync(dir)) return openKubeDirForm();
+  const res = await pick(`Kubeconfig — ${dir}`, Promise.resolve().then(() => listKubeconfigs(dir)), { f2: 'Папка с конфигами', current: db.kubeconfig });
+  if (res === PICK_FOLDER) return openKubeDirForm();
+  if (res) applyKubeconfig(res);
+}
+function applyKubeconfig(file) {
+  if (sameFile(file, db.kubeconfig)) return;
+  const apply = () => { db.kubeconfig = file; saveDb(); };
+  // пробросы привязаны к кластеру, поэтому при смене конфига останавливаем те, что используют общий
+  const act = db.services.filter(s => isActive(s) && !s.kubeconfig);
+  if (!act.length) { apply(); return draw(); }
+  ui.mode = 'confirm';
+  ui.confirm = { msg: `Переключить на «${path.basename(file)}»? Будет остановлено пробросов: ${act.length}`, yes: () => { act.forEach(stop); apply(); closeConfirm(); } };
+  draw();
+}
+function openKubeDirForm() {
   const f = {
-    title: 'Общий kubeconfig', focus: 0, err: '',
-    fields: [{ key: 'kc', label: 'Путь', value: db.kubeconfig || '', wide: true }],
+    title: 'Папка с kubeconfig-файлами', focus: 0, err: '',
+    fields: [{ key: 'dir', label: 'Путь к папке', value: db.kubeconfigDir || '', hint: 'например C:\\Users\\me\\kube' }],
     buttons: [
-      { key: 'Enter', label: 'Сохранить', fn: () => { db.kubeconfig = String(fval(f, 'kc')).trim().replace(/^"|"$/g, ''); saveDb(); closeForm(); } },
+      { key: 'Enter', label: 'Сохранить', fn: () => {
+        const dir = path.resolve(expandHome(String(fval(f, 'dir')).trim().replace(/^"|"$/g, '')));
+        if (!String(fval(f, 'dir')).trim()) return fail(f, 'Укажите путь к папке');
+        let ok = false;
+        try { ok = fs.statSync(dir).isDirectory(); } catch (_) {}
+        if (!ok) return fail(f, 'Такой папки нет: ' + dir);
+        db.kubeconfigDir = dir; saveDb(); closeForm(); switchKubeconfig();
+      } },
       { key: 'Esc', label: 'Отмена', fn: closeForm },
     ],
     submit: () => f.buttons[0].fn(),
   };
+  f.info = () => 'После сохранения откроется список конфигов из этой папки';
   openForm(f);
 }
 
@@ -617,9 +657,9 @@ function formKey(e) {
 function pick(title, loader, opts = {}) {
   return new Promise(resolve => {
     const prev = ui.mode;
-    const p = ui.picker = { title, multi: !!opts.multi, checked: opts.checked || new Set(), items: null, err: '', filter: '', sel: 0, off: 0, done: v => { ui.picker = null; ui.mode = prev; draw(); resolve(v); } };
+    const p = ui.picker = { title, f2: opts.f2, multi: !!opts.multi, checked: opts.checked || new Set(), items: null, err: '', filter: '', sel: 0, off: 0, done: v => { ui.picker = null; ui.mode = prev; draw(); resolve(v); } };
     ui.mode = 'picker'; draw();
-    Promise.resolve(loader).then(items => { p.items = items; draw(); }, err => { p.err = err.message; draw(); });
+    Promise.resolve(loader).then(items => { p.items = items; if (opts.current !== undefined) { const i = items.findIndex(x => x.value === opts.current || sameFile(x.value, opts.current)); if (i >= 0) p.sel = i; } draw(); }, err => { p.err = err.message; draw(); });
   });
 }
 function filtered(p) {
@@ -632,7 +672,8 @@ function renderPicker() {
   rows.push(new Row(1).add('  Фильтр: ', C.dim).add(p.filter + '▌', C.bold).fill());
   const listH = Math.max(3, H - 4);
   if (p.err) rows.push(new Row(2).add('  ' + p.err, C.red).fill());
-  else if (!p.items) rows.push(new Row(2).add('  Загрузка из кластера…', C.yellow).fill());
+  else if (!p.items) rows.push(new Row(2).add('  Загрузка…', C.yellow).fill());
+  else if (!p.items.length) rows.push(new Row(2).add('  Список пуст', C.gray).fill());
   const items = filtered(p);
   if (p.sel >= items.length) p.sel = Math.max(0, items.length - 1);
   if (p.sel < p.off) p.off = p.sel;
@@ -654,6 +695,7 @@ function renderPicker() {
   const b = buttonRows(H - 1, [
     ...(p.multi ? [{ key: 'Пробел', label: 'Отметить', fn: () => { const it = filtered(p)[p.sel]; if (it) toggleChecked(p, it); } }] : []),
     { key: 'Enter', label: p.multi ? `Готово (${p.checked.size})` : 'Выбрать', fn: () => { if (p.multi) return finishMulti(p); const it = filtered(p)[p.sel]; if (it) p.done(it.value); } },
+    ...(p.f2 ? [{ key: 'F2', label: p.f2, fn: () => p.done(PICK_FOLDER) }] : []),
     { key: 'Esc', label: 'Назад', fn: () => p.done(null) }]);
   rows[H - 1] = b[0].fill();
   return rows;
@@ -664,6 +706,7 @@ function pickerKey(e) {
   const p = ui.picker, items = filtered(p);
   switch (e.k) {
     case 'esc': return p.done(null);
+    case 'f2': if (p.f2) return p.done(PICK_FOLDER); break;
     case 'up': p.sel = Math.max(0, p.sel - 1); break;
     case 'down': p.sel = Math.min(items.length - 1, p.sel + 1); break;
     case 'pgup': p.sel = Math.max(0, p.sel - 10); break;
@@ -678,7 +721,7 @@ function pickerKey(e) {
 }
 async function discover(f) {
   const kc = String(fval(f, 'kubeconfig')).trim() || db.kubeconfig;
-  if (!kc) { f.err = 'Сначала задайте kubeconfig (поле или кнопка K в списке)'; return draw(); }
+  if (!kc) { f.err = 'Сначала выберите kubeconfig (клавиша K в списке)'; return draw(); }
   const ns = await pick('Namespace', kube(kc, ['get', 'ns', '-o', 'json']).then(d => d.items.map(i => ({ label: i.metadata.name, value: i.metadata.name })).sort((a, b) => a.label.localeCompare(b.label))));
   if (!ns) return;
   const svc = await pick(`Service в «${ns}»`, kube(kc, ['-n', ns, 'get', 'svc', '-o', 'json']).then(d => d.items.map(i => {
@@ -789,7 +832,7 @@ function onKey(e) {
   if (e.k === 'char' && e.ch === '1') setTab('all');
   if (e.k === 'char' && e.ch === '2') setTab('running');
   if (e.k === 'char' && e.ch === '3') setTab('groups');
-  if (ch === 'k') return openKubeconfigForm();
+  if (ch === 'k') return switchKubeconfig();
   if (isG) {
     const g = curGroup();
     if (ch === 'a') return openGroupForm();
@@ -866,7 +909,7 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   bftport --help      эта справка
 
 ПЕРВЫЙ ЗАПУСК
-  1. Нажмите K и укажите путь к вашему kubeconfig.
+  1. Нажмите K, укажите папку с вашими kubeconfig и выберите нужный файл.
   2. Выберите сервис и нажмите Enter, чтобы запустить проброс.
   3. Свой сервис: A. Кнопка «Выбрать из кластера» (F2) подтянет namespace,
      service и порты прямо из кластера.
@@ -878,7 +921,8 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   /  или Ctrl+F  поиск (имя, namespace, service, порт, статус); Esc — сбросить
   1 2 3 / Tab    вкладки: Все, Запущенные, Шаблоны
   G              сохранить запущенные сервисы как шаблон
-  K              kubeconfig         Q / Ctrl+C  выход (пробросы останавливаются)
+  K              выбор kubeconfig из папки (F2 в списке — сменить папку)
+  Q / Ctrl+C     выход (пробросы останавливаются)
 
 ШАБЛОНЫ
   Шаблон — именованный набор сервисов. На вкладке «Шаблоны» Enter или двойной
