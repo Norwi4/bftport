@@ -831,7 +831,7 @@ if (process.argv.includes('--update')) {
   const repo = (pkg.repository && pkg.repository.url) || '';
   if (!repo) { console.error('В package.json не указан repository.url'); process.exit(1); }
   const cmp = (a, b) => { const x = a.split('.').map(Number), y = b.split('.').map(Number); for (let i = 0; i < 3; i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d > 0 ? 1 : -1; } return 0; };
-  console.log(`Установлена версия ${pkg.version}. Проверяю ${repo.replace(/^git\+/, '')} …`);
+  console.log(`Установлена версия ${pkg.version}. Проверяю обновления…`);
   const tmp = fs.mkdtempSync(path.join(require('os').tmpdir(), 'bftport-'));
   let remote;
   try {
@@ -852,7 +852,7 @@ if (process.argv.includes('--update')) {
   console.log(`Доступна версия ${remote}. Обновляю…\n`);
   const r = spawnSync('npm', ['install', '-g', repo], { stdio: 'inherit', shell: process.platform === 'win32' });
   if (r.status !== 0) { console.error('\nОбновление не удалось (код ' + r.status + ').'); process.exit(r.status || 1); }
-  console.log(`\nГотово: bftport ${remote}. Ваши сервисы и шаблоны не затронуты.`);
+  console.log(`\nbftport ${remote}`);
   process.exit(0);
 }
 if (process.argv.includes('--help') || process.argv.includes('-h')) {
