@@ -944,7 +944,7 @@ function openSettings() {
     ],
     submit: () => submitSettings(f),
   };
-  f.info = () => ['', 'Отдельное окно логов: Windows (cmd/PowerShell) и Debian с графическим терминалом', 'Значки: «авто» — Unicode на Windows, Nerd Font на Linux/macOS; без Nerd Font выберите Unicode', '', 'О приложении', `  Версия: ${VERSION}`];
+  f.info = () => ['', 'Отдельное окно логов: Windows, Debian и ALT Linux (Konsole)', 'Значки: «авто» — Unicode на Windows, Nerd Font на Linux/macOS; без Nerd Font выберите Unicode', '', 'О приложении', `  Версия: ${VERSION}`];
   openForm(f);
 }
 function submitSettings(f) {
@@ -1804,17 +1804,23 @@ async function resolvePods(kc, s) {
 const LOG_BUF = 5000;
 const cleanLine = t => t.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '').replace(/\t/g, '  ').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
 
-let debianLogWindow = null;
-function canOpenLogWindow() {
-  if (process.platform === 'win32') return true;
-  if (process.platform !== 'linux' || !(process.env.DISPLAY || process.env.WAYLAND_DISPLAY)) return false;
-  if (debianLogWindow !== null) return debianLogWindow;
-  try { debianLogWindow = /^ID=debian\s*$/m.test(fs.readFileSync('/etc/os-release', 'utf8').replace(/"/g, '')); }
-  catch (_) { debianLogWindow = false; }
-  return debianLogWindow;
+let linuxLogTerminal;
+function logWindowTerminal() {
+  if (process.platform === 'win32') return { program: 'powershell.exe' };
+  if (process.platform !== 'linux' || !(process.env.DISPLAY || process.env.WAYLAND_DISPLAY)) return null;
+  if (linuxLogTerminal !== undefined) return linuxLogTerminal;
+  try {
+    const osRelease = fs.readFileSync('/etc/os-release', 'utf8');
+    if (/^ID=altlinux\s*$/im.test(osRelease)) linuxLogTerminal = { program: 'konsole' };
+    else if (/^ID=debian\s*$/im.test(osRelease)) linuxLogTerminal = { program: 'x-terminal-emulator' };
+    else linuxLogTerminal = null;
+  } catch (_) { linuxLogTerminal = null; }
+  return linuxLogTerminal;
 }
+function canOpenLogWindow() { return !!logWindowTerminal(); }
 function launchLogWindow(s, pod) {
-  if (!canOpenLogWindow()) return false;
+  const terminal = logWindowTerminal();
+  if (!terminal) return false;
   const svc = { id: s.id, name: s.name, namespace: s.namespace, service: s.service,
     kind: s.kind === 'pod' ? 'pod' : 'service', localPort: s.localPort, remotePort: s.remotePort, kubeconfig: s.kubeconfig || '' };
   const arg = LOG_WINDOW_ARG + Buffer.from(JSON.stringify({ svc, pod }), 'utf8').toString('base64url');
@@ -1825,7 +1831,7 @@ function launchLogWindow(s, pod) {
     program = 'powershell.exe';
     args = ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')];
   } else {
-    program = 'x-terminal-emulator';
+    program = terminal.program;
     args = ['-e', process.execPath, __filename, arg];
   }
   let helper;

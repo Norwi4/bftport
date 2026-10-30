@@ -50,7 +50,7 @@ const PHRASES = [
   ['Проброс порта / стоп проброса', 'Forward port / stop forward'], ['Сохранить запущенные как шаблон', 'Save running as template'],
   ['Старт / стоп выбранного сервиса', 'Start / stop selected service'], ['не удалось получить подробности', 'failed to load details'],
   ['Значки: «авто» — Unicode на Windows, Nerd Font на Linux/macOS; без Nerd Font выберите Unicode', 'Icons: “auto” means Unicode on Windows and Nerd Font on Linux/macOS; pick Unicode if you have no Nerd Font'],
-  ['Отдельное окно логов: Windows (cmd/PowerShell) и Debian с графическим терминалом', 'Separate log window: Windows (cmd/PowerShell) and Debian with a graphical terminal'],
+  ['Отдельное окно логов: Windows, Debian и ALT Linux (Konsole)', 'Separate log window: Windows, Debian, and ALT Linux (Konsole)'],
   // вкладки
   ['Избранное', 'Favorites'], ['Запущенные', 'Running'], ['Шаблоны', 'Templates'], ['Кластер', 'Cluster'],
   // колонки

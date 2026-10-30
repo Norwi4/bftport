@@ -2,6 +2,11 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/), версии — [SemVer](https://semver.org/lang/ru/).
 
+## [2.0.2] — 2026-10-30
+
+### Добавлено
+- Автоматический запуск отдельного окна логов в Konsole на ALT Linux.
+
 ## [2.0.1] — 2026-10-30
 
 ### Добавлено
