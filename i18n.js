@@ -50,6 +50,7 @@ const PHRASES = [
   ['Проброс порта / стоп проброса', 'Forward port / stop forward'], ['Сохранить запущенные как шаблон', 'Save running as template'],
   ['Старт / стоп выбранного сервиса', 'Start / stop selected service'], ['не удалось получить подробности', 'failed to load details'],
   ['Значки: «авто» — Unicode на Windows, Nerd Font на Linux/macOS; без Nerd Font выберите Unicode', 'Icons: “auto” means Unicode on Windows and Nerd Font on Linux/macOS; pick Unicode if you have no Nerd Font'],
+  ['Отдельное окно логов: Windows (cmd/PowerShell) и Debian с графическим терминалом', 'Separate log window: Windows (cmd/PowerShell) and Debian with a graphical terminal'],
   // вкладки
   ['Избранное', 'Favorites'], ['Запущенные', 'Running'], ['Шаблоны', 'Templates'], ['Кластер', 'Cluster'],
   // колонки
@@ -93,6 +94,8 @@ const PHRASES = [
     '  Tab/↑↓ — fields · ←→ Home End — cursor · Ctrl+V — paste · Ctrl+U — clear · Space — toggle'],
   // настройки
   ['Язык / Language', 'Language / Язык'], ['Настройки', 'Settings'], ['О приложении', 'About'], ['Версия:', 'Version:'],
+  ['Открывать логи в отдельном окне', 'Open logs in a separate window'],
+  ['не удалось открыть окно логов: ', 'could not open the log window: '],
   // списки и вкладки
   ['kubeconfig не выбран — нажмите K', 'kubeconfig not selected — press K'], ['kubeconfig не выбран (K)', 'kubeconfig not selected (K)'],
   ['  Пока пусто. Нажмите ', '  Nothing here yet. Press '], [' чтобы добавить сервис', ' to add a service'],
@@ -106,6 +109,7 @@ const PHRASES = [
     '  N — choose a namespace (if you lack cluster-wide permissions) · R — retry · K — another config'],
   ['поиск: / или Ctrl+F', 'search: / or Ctrl+F'], [' найдено: ', ' found: '],
   [' L — открыть на весь экран (логи пода) ', ' L — open full screen (pod logs) '], [' Детали', ' Details'], [' Состав', ' Contents'],
+  ['L — открыть логи в новом окне ', 'L — open logs in a new window '],
   ['подов', 'pods'], ['обновлено', 'updated'], ['обновление…', 'refreshing…'], ['только просмотр', 'read-only'],
   ['все namespace', 'all namespaces'], ['Все namespace', 'All namespaces'], ['узел: ', 'node: '], ['возраст: ', 'age: '],
   ['перезапусков: ', 'restarts: '], ['создан: ', 'created: '], ['★ избранное: ', '★ favorite: '], ['(уже в избранном)', '(already in favorites)'],

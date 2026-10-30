@@ -16,6 +16,7 @@ if (!fs.existsSync(DB_FILE)) {
 }
 const LOG_MAX = 300;
 const VERSION = require('./package.json').version;
+const LOG_WINDOW_ARG = '--logs-window=';
 
 // ───────────────────────── база ─────────────────────────
 let db = loadDb();
@@ -770,7 +771,7 @@ function renderList() {
   rule.add('─'.repeat(rule.lim === undefined ? W : rule.lim), C.line);
   done(rule);
   const sep = mk(4 + listH);
-  const hint = cur ? 'L — открыть на весь экран (логи пода) ' : '';
+  const hint = cur ? (db.logsWindow && canOpenLogWindow() ? 'L — открыть логи в новом окне ' : 'L — открыть на весь экран (логи пода) ') : '';
   sep.add(' Логи' + (cur ? ': ' : ''), C.dim + C.bold, () => openLogs());
   if (cur) sep.add(cur.name, C.bold, () => openLogs(), true);
   sep.add(' '.repeat(Math.max(1, (sep.lim === undefined ? W : sep.lim) - sep.x - tr(hint).length)), '');
@@ -935,6 +936,7 @@ function openSettings() {
       { key: 'dir', label: 'Папка с kubeconfig', value: db.kubeconfigDir || '', hint: 'например C:\\Users\\me\\kube' },
       { key: 'lang', label: 'Язык / Language', value: UILANG, choice: [{ v: 'ru', label: 'Русский' }, { v: 'en', label: 'English' }] },
       { key: 'icons', label: 'Значки', value: ICON_MODES.includes(db.icons) ? db.icons : 'auto', choice: [{ v: 'auto', label: 'авто' }, { v: 'unicode', label: 'Unicode' }, { v: 'nerd', label: 'Nerd Font' }, { v: 'ascii', label: 'ASCII' }] },
+      { key: 'logsWindow', label: 'Открывать логи в отдельном окне', value: !!db.logsWindow, bool: true },
     ],
     buttons: [
       { key: 'Enter', label: 'Сохранить', fn: () => submitSettings(f) },
@@ -942,7 +944,7 @@ function openSettings() {
     ],
     submit: () => submitSettings(f),
   };
-  f.info = () => ['', 'Значки: «авто» — Unicode на Windows, Nerd Font на Linux/macOS; без Nerd Font выберите Unicode', '', 'О приложении', `  Версия: ${VERSION}`];
+  f.info = () => ['', 'Отдельное окно логов: Windows (cmd/PowerShell) и Debian с графическим терминалом', 'Значки: «авто» — Unicode на Windows, Nerd Font на Linux/macOS; без Nerd Font выберите Unicode', '', 'О приложении', `  Версия: ${VERSION}`];
   openForm(f);
 }
 function submitSettings(f) {
@@ -959,6 +961,7 @@ function submitSettings(f) {
   if (lang === 'ru' || lang === 'en') { db.lang = lang; UILANG = lang; }
   const ic = fval(f, 'icons');
   if (ICON_MODES.includes(ic)) { db.icons = ic; applyIcons(); }
+  db.logsWindow = !!fval(f, 'logsWindow');
   saveDb(); closeForm();
 }
 function openKubeDirForm() {
@@ -986,7 +989,8 @@ function renderForm() {
   const f = ui.form, rows = [];
   rows.push(new Row(0).add(` ${IC.brand} BFTPort `, C.title).add(' ' + f.title + ' ', C.chip).fill());
   rows.push(new Row(1).fill());
-  const labelW = 18, boxW = Math.max(20, Math.min(64, W - labelW - 6));
+  const labelW = Math.min(32, Math.max(18, ...f.fields.map(fl => tr(fl.label).length)));
+  const boxW = Math.max(20, Math.min(64, W - labelW - 6));
   f.fields.forEach((fl, i) => {
     const y = 2 + i, r = new Row(y), focus = i === f.focus;
     const focusFn = () => { f.focus = i; if (fl.bool) fl.value = !fl.value; draw(); };
@@ -1771,13 +1775,8 @@ function submitPodForward(f, p) {
 }
 // Логи пода: тот же просмотр, что и для сервиса, но без выбора пода — выбран конкретный
 function openPodLogs(p) {
-  const s = podSvc(p), d = detailOf(p);
-  ui.lv = { svc: s, src: 'pod', pod: [], scroll: 0, filter: '', searching: false, wrap: true, proc: null, timer: null, closed: false,
-    gen: 0, retries: 0, endedAt: 0, msg: 'подключение…', selector: '', carryO: '', carryE: '',
-    mode: 'one', podName: p.name, podInfo: { name: p.name, start: d ? d.start : '', phase: p.status, container: '', containers: d ? d.containers.length : 0 },
-    podCount: 1, fmt: 1, fmtGen: 0, fmode: 'hl', curRef: null, regex: false, exp: null, note: '', noteUntil: 0, sel: null, drag: null, clk: null, container: '' };
-  ui.mode = 'logs';
-  podLogsStart(ui.lv); draw();
+  const d = detailOf(p);
+  openLogsFor(podSvc(p), { name: p.name, start: d ? d.start : '', phase: p.status, containers: d ? d.containers.length : 0 });
 }
 async function chooseContainer(lv) {
   let res;
@@ -1805,11 +1804,57 @@ async function resolvePods(kc, s) {
 const LOG_BUF = 5000;
 const cleanLine = t => t.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '').replace(/\t/g, '  ').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
 
+let debianLogWindow = null;
+function canOpenLogWindow() {
+  if (process.platform === 'win32') return true;
+  if (process.platform !== 'linux' || !(process.env.DISPLAY || process.env.WAYLAND_DISPLAY)) return false;
+  if (debianLogWindow !== null) return debianLogWindow;
+  try { debianLogWindow = /^ID=debian\s*$/m.test(fs.readFileSync('/etc/os-release', 'utf8').replace(/"/g, '')); }
+  catch (_) { debianLogWindow = false; }
+  return debianLogWindow;
+}
+function launchLogWindow(s, pod) {
+  if (!canOpenLogWindow()) return false;
+  const svc = { id: s.id, name: s.name, namespace: s.namespace, service: s.service,
+    kind: s.kind === 'pod' ? 'pod' : 'service', localPort: s.localPort, remotePort: s.remotePort, kubeconfig: s.kubeconfig || '' };
+  const arg = LOG_WINDOW_ARG + Buffer.from(JSON.stringify({ svc, pod }), 'utf8').toString('base64url');
+  let program, args;
+  if (process.platform === 'win32') {
+    const psQuote = v => "'" + String(v).replace(/'/g, "''") + "'";
+    const command = `$ErrorActionPreference = 'Stop'; Start-Process -FilePath ${psQuote(process.execPath)} -ArgumentList ${psQuote('"' + __filename + '" ' + arg)} -WorkingDirectory ${psQuote(__dirname)} -WindowStyle Normal`;
+    program = 'powershell.exe';
+    args = ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')];
+  } else {
+    program = 'x-terminal-emulator';
+    args = ['-e', process.execPath, __filename, arg];
+  }
+  let helper;
+  try { helper = spawn(program, args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] }); }
+  catch (e) { flash('не удалось открыть окно логов: ' + e.message); return false; }
+  let err = '', failed = false;
+  const failOpen = message => {
+    if (failed) return;
+    failed = true;
+    flash('не удалось открыть окно логов: ' + message);
+    if (ui.mode === 'list') openLogsFor(s, pod, true);
+  };
+  helper.stderr.on('data', d => { err = (err + d.toString()).slice(-1000); });
+  helper.on('error', e => failOpen(e.message));
+  const launchedAt = Date.now();
+  helper.on('exit', code => { if (code && Date.now() - launchedAt < 3000) failOpen(err.trim().split('\n')[0] || `код ${code}`); });
+  return true;
+}
+
 function openLogs() {
-  const s = curSvc(); if (!s) return;
+  const s = curSvc(); if (s) openLogsFor(s);
+}
+// В дочернем процессе запускается только просмотр логов: автозапуск сервисов остаётся в основном окне.
+function openLogsFor(s, pod = null, forceInline = false) {
+  if (!forceInline && db.logsWindow && launchLogWindow(s, pod)) return;
   ui.lv = { svc: s, src: 'pod', pod: [], scroll: 0, filter: '', searching: false, wrap: true, proc: null, timer: null, closed: false,
     gen: 0, retries: 0, endedAt: 0, msg: 'подключение…', selector: '', carryO: '', carryE: '',
-    mode: null, podName: '', podInfo: null, podCount: 0, fmt: 1, fmtGen: 0, fmode: 'hl', curRef: null, regex: false, exp: null, note: '', noteUntil: 0, sel: null, drag: null, clk: null }; // mode: null (ещё не выбрано) | 'one' | 'all'
+    mode: pod ? 'one' : null, podName: pod ? pod.name : '', podInfo: pod || null, podCount: pod ? 1 : 0, standalone: !!logWindowRequest,
+    fmt: 1, fmtGen: 0, fmode: 'hl', curRef: null, regex: false, exp: null, note: '', noteUntil: 0, sel: null, drag: null, clk: null, container: '' }; // mode: null (ещё не выбрано) | 'one' | 'all'
   ui.mode = 'logs';
   podLogsStart(ui.lv); draw();
 }
@@ -1818,6 +1863,7 @@ function closeLogs() {
   lv.closed = true; clearTimeout(lv.timer);
   if (lv.exp) { lv.exp.aborted = true; try { lv.exp.proc.kill(); } catch (_) {} } // недокачанный файл удалится сам
   if (lv.proc) { const p = lv.proc; lv.proc = null; try { p.kill(); } catch (_) {} }
+  if (lv.standalone) { if (!lv.exp) exit(); return; }
   ui.lv = null; ui.mode = 'list'; draw();
 }
 function podLogsRestart(lv) {
@@ -2084,7 +2130,7 @@ function exportAll(lv, file) {
     if (carry) out.write(render(carry));
     out.end(() => {
       lv.exp = null;
-      if (x.aborted) { try { fs.unlinkSync(file); } catch (_) {} return; }
+      if (x.aborted) { try { fs.unlinkSync(file); } catch (_) {} if (lv.standalone && lv.closed) exit(); return; }
       if (code === 0 && !x.bad) return lvNote(lv, `⇩ сохранено: ${shortPath(file)} (${x.lines} строк)`);
       try { fs.unlinkSync(file); } catch (_) {}
       lvNote(lv, 'экспорт не удался: ' + (x.err.trim().split('\n')[0] || 'код ' + code), true);
@@ -2306,7 +2352,7 @@ function renderLogs() {
 
   const tb = new Row(1).add(' ');
   const srcBtn = (id, label) => tb.add(` ${label} `, lv.src === id ? C.key : C.dim, () => { lv.src = id; lv.scroll = 0; draw(); }).add(' ');
-  srcBtn('pod', '1 Под'); srcBtn('pf', '2 Port-forward');
+  srcBtn('pod', '1 Под'); if (!lv.standalone) srcBtn('pf', '2 Port-forward');
   tb.add(lv.scroll > 0 ? ' ⏸ пауза ' : ' ● live ', lv.scroll > 0 ? C.yellow : C.green, () => { lv.scroll = 0; draw(); });
   tb.add(` ${lines.length} строк `, C.dim);
   if (lv.filter || lv.searching) {
@@ -2371,7 +2417,7 @@ function renderLogs() {
     { key: 'P', label: s.kind === 'pod' ? 'Контейнер' : 'Сменить под', fn: () => choosePod(lv) },
     { key: 'R', label: 'Перечитать', fn: () => { podLogsRestart(lv); draw(); } },
     { key: 'C', label: 'Очистить', fn: () => { lv.pod = []; lv.scroll = 0; draw(); } },
-    { key: 'Tab', label: 'Источник', fn: () => { lv.src = lv.src === 'pod' ? 'pf' : 'pod'; lv.scroll = 0; draw(); } },
+    ...(!lv.standalone ? [{ key: 'Tab', label: 'Источник', fn: () => { lv.src = lv.src === 'pod' ? 'pf' : 'pod'; lv.scroll = 0; draw(); } }] : []),
     { key: 'Esc', label: 'Назад', fn: closeLogs },
   ];
   const br = buttonRows(H - 2, btns);
@@ -2413,13 +2459,13 @@ function logsKey(e) {
     case 'pgdn': lv.scroll = Math.max(0, lv.scroll - (n - 1)); break;
     case 'home': lv.scroll = 1e9; break;
     case 'end': lv.scroll = 0; break;
-    case 'tab': lv.src = lv.src === 'pod' ? 'pf' : 'pod'; lv.scroll = 0; break;
+    case 'tab': if (!lv.standalone) { lv.src = lv.src === 'pod' ? 'pf' : 'pod'; lv.scroll = 0; } break;
     case 'ctrl-f': lv.searching = true; break;
     case 'ctrl-u': lv.filter = ''; lv.curRef = null; lv.scroll = 0; break;
   }
   if (e.k === 'char' && e.ch === '/') lv.searching = true;
   if (e.k === 'char' && e.ch === '1') { lv.src = 'pod'; lv.scroll = 0; }
-  if (e.k === 'char' && e.ch === '2') { lv.src = 'pf'; lv.scroll = 0; }
+  if (e.k === 'char' && e.ch === '2' && !lv.standalone) { lv.src = 'pf'; lv.scroll = 0; }
   if (ch === 'q') return closeLogs();
   if (ch === 'w') lv.wrap = !lv.wrap;
   if (ch === 'f') cycleFmt(lv);
@@ -2728,6 +2774,17 @@ if (process.argv.includes('--keys')) {
   return;
 }
 
+let logWindowRequest = null;
+const logWindowArg = process.argv.find(a => a.startsWith(LOG_WINDOW_ARG));
+if (logWindowArg) {
+  try {
+    logWindowRequest = JSON.parse(Buffer.from(logWindowArg.slice(LOG_WINDOW_ARG.length), 'base64url').toString('utf8'));
+    const s = logWindowRequest.svc, p = logWindowRequest.pod;
+    if (!s || !['service', 'pod'].includes(s.kind) || !['name', 'namespace', 'service'].every(k => typeof s[k] === 'string' && s[k]) ||
+        (p && (s.kind !== 'pod' || typeof p.name !== 'string' || !p.name))) throw new Error('неверные параметры');
+  } catch (e) { console.error('Не удалось открыть логи: ' + e.message); process.exit(1); }
+}
+
 process.stdout.write('\x1b[?1049h\x1b[?7l\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h');
 process.stdin.setRawMode(true);
 process.stdin.resume();
@@ -2741,5 +2798,5 @@ process.on('uncaughtException', e => {
   console.error(e);
   process.exit(1);
 });
-db.services.filter(s => s.autostart).forEach(start);
-render();
+if (logWindowRequest) openLogsFor(logWindowRequest.svc, logWindowRequest.pod, true);
+else { db.services.filter(s => s.autostart).forEach(start); render(); }
